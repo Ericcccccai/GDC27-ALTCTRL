@@ -1,0 +1,5 @@
+:root { font-family: Arial, sans-serif; color-scheme: light; background: #f5eada; }
+* { box-sizing: border-box; }
+html, body, #game { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+body { overscroll-behavior: none; }
+canvas { display: block; }
