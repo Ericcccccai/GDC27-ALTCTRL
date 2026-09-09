@@ -1,4 +1,4 @@
-# Pimple Pop
+# Pimple Studio
 
 A small Phaser + TypeScript arcade prototype for a soft pimple shaped controller. The game automatically selects a target. The player reads it, charges an action, and releases to pop it.
 
