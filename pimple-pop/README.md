@@ -19,6 +19,14 @@ npm run build
 npm run preview
 ```
 
+## GitHub Pages
+
+The repository workflow `.github/workflows/pages.yml` tests and builds this game on every push to `main`, then publishes only `pimple-pop/dist` to GitHub Pages. Generated files stay out of Git.
+
+In repository Settings → Pages, choose **GitHub Actions** as the source. Private repositories require a GitHub plan that supports Pages. The expected game address is https://ericcccccai.github.io/GDC27-ALTCTRL/.
+
+Vite uses a relative asset base so the production build works under the repository URL. Run `npm run build` followed by `npm run preview` to preview the production files locally. Keyboard play needs no backend. Arduino input still requires a browser supporting Web Serial and an explicit device connection.
+
 ## Controls
 
 | Input | Action |
