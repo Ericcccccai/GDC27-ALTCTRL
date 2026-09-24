@@ -1,0 +1,49 @@
+#sensor-panel { position: fixed; inset: 0; z-index: 100; overflow: auto; background: #f6f1e8; color: #382b27; padding: 28px max(24px, calc((100vw - 1380px) / 2)); font-family: Arial, sans-serif; }
+#sensor-panel[hidden] { display: none; }
+#sensor-panel h1 { font-size: 40px; margin: 5px 0 10px; letter-spacing: -1.5px; }
+#sensor-panel h2 { margin: 0; font-size: 20px; }
+#sensor-panel p { line-height: 1.5; margin: 8px 0; }
+.sensor-header, .sensor-tools, .device-title, .graph-title { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.eyebrow { font-size: 11px; font-weight: bold; letter-spacing: 2px; color: #7a6d60; }
+#sensor-panel button { cursor: pointer; border: 1px solid #382b27; background: #fffdf8; color: #382b27; padding: 12px 19px; border-radius: 9px; font: bold 14px Arial; }
+#sensor-panel button:hover { background: #e4ecdf; }
+#sensor-panel button:focus-visible, #sensor-panel input:focus-visible { outline: 3px solid #28827e; outline-offset: 3px; }
+#sensor-panel #reset-zero { color: #fffdf8; background: #382b27; white-space: nowrap; }
+.sensor-tools { flex-wrap: wrap; background: #e8edde; padding: 20px 24px; margin: 22px 0; border-radius: 16px; }
+.sensor-tools p { font-size: 13px; }
+.sensor-tools label { min-width: 210px; font-size: 13px; }
+.sensor-tools output { float: right; font-weight: bold; }
+.sensor-tools input { display: block; width: 100%; margin-top: 12px; accent-color: #28827e; }
+.sensor-connections { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
+.sensor-device, .sensor-graph { background: #fffdf8; border: 1px solid #dfd5c7; border-radius: 16px; padding: 22px; min-width: 0; }
+.legend { display: inline-block; width: 10px; height: 10px; margin-right: 10px; border-radius: 50%; }
+.legend.L { background: #28827e; }.legend.R { background: #be6547; }
+.status { color: #8d482f; font-size: 12px; padding: 5px 9px; background: #f6e8df; border-radius: 20px; }
+.live .status { color: #245f4e; background: #dfecdf; }
+.sensor-device code { display: block; margin: 12px 0 8px; color: #736759; font-size: 12px; overflow-wrap: anywhere; }
+.sensor-device p, .sensor-meta { font-size: 12px; overflow-wrap: anywhere; }
+.sensor-meta { color: #736759; }
+.sensor-device table { width: 100%; border-collapse: collapse; margin: 16px 0 10px; font-variant-numeric: tabular-nums; font-size: 13px; }
+.sensor-device th, .sensor-device td { text-align: right; padding: 7px 4px; border-bottom: 1px solid #ece4da; }
+.sensor-device th:first-child { text-align: left; }
+.sensor-device thead { color: #766756; font-size: 11px; }
+.sensor-device button { margin-top: 10px; }
+.sensor-graphs { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 18px; margin-top: 20px; }
+.graph-title h2 { font-size: 18px; }.graph-title span { font-size: 12px; color: #786e62; white-space: nowrap; }
+.graph-values { font: bold 14px monospace; white-space: pre; }
+.sensor-graph svg { width: 100%; display: block; }.sensor-graph svg text { font: 11px Arial; fill: #796c5d; }
+.history { border-radius: 8px; }.graph-caption { font-size: 11px; color: #786e62; }
+.sensor-notes { margin: 22px 0; font-size: 13px; max-width: 980px; color: #786e62; }
+@media (max-width: 850px) { .sensor-tools { flex-wrap: wrap; }.sensor-graphs { grid-template-columns: 1fr; }.sensor-connections { grid-template-columns: 1fr; }.sensor-header { align-items: start; }.sensor-graph svg { max-height: 180px; } }
+
+.gesture-tools { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.gesture-tools > div { grid-column: 1 / -1; }
+.gesture-tools label { min-width: 0; }
+.gesture-tools input { box-sizing: border-box; padding: 8px; border: 1px solid #b6aa9d; border-radius: 5px; font: inherit; }
+@media (max-width: 850px) { .gesture-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.tuning-help { display: block; font-size: 12px; line-height: 1.5; margin-top: 8px; color: #736759; }
+
+.keyboard-testing { border: 1px solid #b38b6c; background: #f5e7d9; }
+.keyboard-testing input { display: inline-block; width: auto; margin: 0 10px 0 0; }
+.keyboard-testing label { font-weight: bold; }

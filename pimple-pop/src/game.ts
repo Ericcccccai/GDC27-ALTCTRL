@@ -1,11 +1,31 @@
 export type ActionKind = 'punch' | 'squeeze';
 export type Phase = 'ready' | 'countdown' | 'playing' | 'results';
-export interface Target { kind: ActionKind; strength: number; position: number; variant: number }
+export const PIMPLE_TYPES = {
+  1: { name: 'Small whitehead', kind: 'punch', strength: 0.35, size: 58 },
+  2: { name: 'Deep bump', kind: 'squeeze', strength: 0.65, size: 76 },
+  3: { name: 'Inflamed head', kind: 'punch', strength: 0.55, size: 72 },
+  4: { name: 'Blackhead', kind: 'squeeze', strength: 0.45, size: 60 },
+  5: { name: 'Large whitehead', kind: 'punch', strength: 0.45, size: 76 },
+  6: { name: 'Whitehead', kind: 'punch', strength: 0.35, size: 62 },
+} as const;
+export const PIMPLE_SEQUENCE = [1, 2, 6, 4, 5, 3] as const;
+export interface Target { kind: ActionKind; strength: number; position: number; variant: keyof typeof PIMPLE_TYPES }
 export interface GameState { phase: Phase; remainingMs: number; score: number; combo: number; bestCombo: number; popped: number; attempts: number; target: Target }
 export const ROUND_MS = 45_000;
 export function targetFor(index: number): Target {
-  const kind = index % 3 === 1 ? 'squeeze' : 'punch';
-  return { kind, strength: kind === 'squeeze' ? 0.65 : 0.35, position: (index * 3 + Math.floor(index / 5)) % 7, variant: index % 4 + 1 };
+  const variant = PIMPLE_SEQUENCE[index % PIMPLE_SEQUENCE.length];
+  const { kind, strength } = PIMPLE_TYPES[variant];
+  return { kind, strength, position: (index * 3 + Math.floor(index / 5)) % 7, variant };
+}
+/** Show each spot's next target in advance, so its artwork never changes on selection. */
+export function targetsOnFace(index: number): Target[] {
+  const targets: Target[] = [];
+  // The seven-position pattern repeats every 35 targets and visits every spot.
+  for (let offset = 0; offset < 35 && targets.filter(Boolean).length < 7; offset++) {
+    const target = targetFor(index + offset);
+    targets[target.position] ??= target;
+  }
+  return targets;
 }
 export function createGame(): GameState {
   return { phase: 'ready', remainingMs: ROUND_MS, score: 0, combo: 0, bestCombo: 0, popped: 0, attempts: 0, target: targetFor(0) };

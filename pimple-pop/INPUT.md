@@ -1,28 +1,53 @@
-# Input module
+# Sensor input
 
-**Keyboard**
+## Raw USB protocol
 
-`KeyboardInput(window, onAction)` emits `{ kind, strength, source: 'keyboard' }` on release. Up charges `punch`; Left or Right charges `squeeze`. Strength is elapsed hold time divided by 1200 milliseconds, clamped to 0 through 1. A quick tap can have zero strength. `getCharge()` returns `{ kind, strength }` while charging, otherwise `null`.
-
-Left and Right share one gesture: releasing the last held squeeze key fires it. The first action wins a conflict. Other action keys are ignored until all tracked keys are released; they never become a deferred action. Key repeat does not restart charging. Blur, document hiding, and `reset()` cancel without emitting. `destroy()` cancels and removes listeners. Arrow keys prevent page scrolling while this instance is attached.
-
-**Serial protocol**
-
-`SerialLineParser.push(chunk)` returns complete action events with `source: 'serial'`. `reset()` discards any unfinished record. Example device output:
+The local Vite server opens right `/dev/cu.usbmodem21101` and left `/dev/cu.usbmodem21401` at 115200 baud. USB path determines physical side. A differing firmware label is reported on the card. Close other serial readers first. Do not run dev and preview servers together.
 
 ```text
-PUNCH,0.83
-SQUEEZE,0.71
+IMU,L,42,123456,0.01000,-0.02000,1.00100,0.12000,-0.08000,0.03000
 ```
 
-Terminate every record with LF; CRLF is also accepted. Commands are uppercase. Strength must be `0`, `1`, or a decimal with an integer part and at least one fractional digit, within 0 through 1. Spaces, signs, exponent notation, extra fields, and malformed records are rejected. A record may contain at most 64 characters before LF, including an optional CR. Oversized records are discarded through the next LF. Partial records survive chunk boundaries; incomplete data is never emitted. Stored unfinished record data is bounded to 64 characters. Returned events scale with the number of valid records in the supplied chunk.
+Fields are `IMU,side,sequence,time_us,ax,ay,az,gx,gy,gz`. Acceleration is g including gravity; gyro is degrees per second. The strict bounded parser accepts fragmented LF/CRLF records and ignores firmware comments. Malformed records are counted and rejected. Device clocks are independent; processing uses host receipt timestamps.
 
-**Browser connection**
+Every decoded frame is queued, including multiple frames in a serial chunk. `/api/sensors` emits `{ throughAt, links, samples, overflow }` every 50 ms. Each sample contains `{ side, at, frame }`. `links` contains latest connection diagnostics. A batch holds at most 512 frames; overflow cancels classification and recalibrates rather than trusting incomplete motion. Slow clients are disconnected. New subscribers receive connection state with no replayed action samples.
 
-`SerialInput(onAction)` provides `static isSupported(): boolean`, `connect(): Promise<void>`, `disconnect(): Promise<void>`, and assignable `onStatus: (status: string) => void`. Call `connect()` from a user click and handle its rejection if the chooser is cancelled or opening fails. The device opens at 115200 baud. This is an optional browser capability requiring a secure context and browser support; keyboard input works independently. `onStatus` supplies display text; callbacks should not throw.
+## Shared calibration and freshness
 
-Repeated connect calls share the pending connection. Disconnect cancels a pending read, waits for its lock to be released, then closes the port. Disconnect during the chooser waits for the user to finish that browser dialog, which the application cannot dismiss. Read errors close the connection and report a status; reconnect explicitly. Disconnect clears partial records. The implementation follows the stream cleanup order in [Chrome's official Web Serial documentation](https://developer.chrome.com/docs/capabilities/serial).
+`SensorStore` owns one EventSource, two `SensorSignal` baselines, and one classifier per page. The game and lab share these objects. The first valid reading sets a fixed zero. Reset clears selected baselines immediately and only samples captured after reset can establish a new zero. There is no baseline drift correction during healthy streaming.
 
-**Physical sensor responsibility**
+Stale data at one second, disconnects, and reconnects cancel pending gestures. A stale board is excluded, and returning boards establish a fresh baseline. Either board alone can detect either action. No live board means no input.
 
-This module consumes classified action records. It does not read raw IMU samples or implement a dual IMU classifier. Real hardware integration must provide sensor alignment, baseline and range calibration, noise filtering, synchronization between the two sensors, gesture segmentation, punch versus squeeze classification, normalized strength, and repeat suppression in firmware or an upstream application. Validate those choices on the actual hardware before treating serial events as physical gestures. No physical hardware behavior has been verified by these software tests.
+The diagrams show signed baseline changes smoothed over 150 ms, then a soft dead zone, default 0.06 g. The table exposes raw, zero, unfiltered change, and diagram output (Used). The game uses **unsmoothed** baseline changes: `max(0, abs(raw - zero) - deadZone)`. Diagnostic smoothing never feeds gesture detection.
+
+## Gesture discrimination
+
+1. Hold both active axes below 45% of their trigger thresholds for 180 ms to arm.
+2. Either board crossing its X or Z trigger opens a 100 ms peak window shared by both boards. Defaults are 0.20 g after subtracting the dead zone.
+3. Collect each axis’s maximum absolute evidence across both boards. Compare X peak / punch trigger against Z peak / squeeze trigger. Larger normalized evidence wins; exact ties select punch. The current game target is never consulted.
+4. Normalize the winning peak by its full strength setting, default 3.00 g for punch and 1.20 g for squeeze, and clamp to 0 through 1. Correct action, sufficient strength, and existing combo rules determine scoring. Both sides of one impact produce one action.
+5. Require a 300 ms cooldown and fresh quiet evidence before another gesture. Sustained movement cannot repeat actions. Delayed batches are processed in timestamp order so later peaks cannot change an earlier window’s winner. Windows close only after the server capture watermark passes their end; the browser timer cannot close a window while an in-window peak is still queued for the next packet.
+
+Game input is enabled only during play. Opening the lab, hiding the document, losing focus, calibration changes, countdown, and results cancel pending input. Reenabling requires new quiet samples, and buffered samples from before the transition cannot rearm or score. Click or Enter starts and restarts rounds; arrows have no gameplay behavior unless Keyboard test mode is enabled.
+
+The game displays the last detected action and strength, plus X and Z peaks. The lab displays the last **gameplay** gesture and tuning controls. Trigger settings determine when detection starts; full strength settings determine 100% pressure. Full strength must be at least its trigger. Changes cancel pending input.
+
+## Physical limits and validation
+
+X denotes inward/outward and Z denotes squeeze/release for the present mounting. These are acceleration changes, not measured force, displacement, or pressure. Tilt changes gravity and can produce gesture evidence. Trigger and full strength defaults are provisional until tested with real smacks and squeezes by players. Raw live streaming verification alone does not validate physical classification accuracy.
+
+`tests/input.test.ts` exercises raw peaks between display updates, either board, simultaneous boards, sustained motion, quiet rearm, mixed axes, noise, strength clamping, calibration, stale input, reconnect, pause, delayed batches, and buffered transition samples. Browser tests feed mocked raw batches through EventSource into real scoring and test the live diagnostic view when `TEST_HARDWARE=1`.
+
+### Adjusting power sensitivity
+
+Open Sensor Lab and increase **Punch power sensitivity** if small smacks produce too much power. The number is the acceleration peak needed for 100% power, in g after zero and dead zone subtraction. Higher values mean less sensitivity. **Squeeze power sensitivity** works independently. Defaults are 3.00 g for punch and 1.20 g for squeeze; both detection thresholds remain 0.20 g. These are provisional tuning values, not measured physical force.
+
+Power is `min(1, winningPeak / configured100PercentPeak)`. For example, a 0.90 g corrected punch peak now yields 30% at the 3.00 g default, compared with 75% at the previous 1.20 g scale. A 6.00 g setting reduces it to 15%. Detection thresholds decide whether motion starts a gesture; power sensitivity changes how strongly it scores. Valid values span 0.05 through 8 g, with the 100% value at least its detection threshold. Changes cancel pending gestures and apply to the next gesture after quiet rearming. Saved values remain local to this browser; zero baselines are never restored from storage.
+
+## Keyboard test mode
+
+Open **Sensor Lab**, enable **Keyboard test mode**, then choose **Back to game**. Click or press Enter to start. This switch is for testing and defaults off on every reload; sensor sensitivity settings still persist separately.
+
+Hold **Up arrow** to charge a punch, or **Left / Right arrow** to charge a squeeze. Release to act. Charge rises linearly from 0% to 100% over 1.2 seconds. The meter and prompts switch to keyboard instructions, and the game displays **KEYBOARD TEST MODE**. Holding both squeeze arrows produces one action when the last is released. Auto-repeat is ignored, and the first gesture wins when conflicting keys overlap until all are released.
+
+Sensor gameplay is disabled while testing, but live diagnostics continue. Opening the lab, switching modes, losing focus, hiding the page, countdown, results, and restart cancel held input. Returning to sensor play requires fresh quiet readings before detection can rearm. Turn the switch off or reload to return to physical play. Missing sensors never enable keyboard testing automatically.

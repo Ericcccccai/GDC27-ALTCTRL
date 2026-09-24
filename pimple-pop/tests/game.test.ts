@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { act, createGame, startGame, tick, ROUND_MS } from '../src/game';
+import { act, createGame, startGame, tick, ROUND_MS, targetFor, PIMPLE_TYPES, PIMPLE_SEQUENCE, targetsOnFace } from '../src/game';
 
 test('round lasts exactly 45 seconds and stops accepting actions', () => {
   let state = tick(startGame(), 44_999);
@@ -44,4 +44,42 @@ test('combo bonus grows, force is bounded and invalid time does not expire the r
   assert.equal(tick(state, -100).remainingMs, ROUND_MS);
   assert.equal(tick(state, Number.NaN).remainingMs, ROUND_MS);
   assert.equal(act(state, state.target.kind, Number.NaN).outcome, 'weak');
+});
+
+test('v002 progression uses all six distinct designs with stable actions and pressure', () => {
+  assert.deepEqual(PIMPLE_SEQUENCE,[1,2,6,4,5,3]);
+  let state=startGame();
+  const seen=new Set<number>();
+  for(let index=0;index<12;index++) {
+    const target=state.target;
+    const type=PIMPLE_TYPES[target.variant];
+    seen.add(target.variant);
+    assert.equal(target.kind,type.kind);
+    assert.equal(target.strength,type.strength);
+    assert.equal(target.variant,PIMPLE_SEQUENCE[index%6]);
+    assert.equal(act(state,target.kind,target.strength-.01).outcome,'weak');
+    assert.equal(act(state,target.kind==='punch'?'squeeze':'punch',1).outcome,'wrong');
+    const next=act(state,target.kind,target.strength);
+    assert.equal(next.outcome,'correct');
+    assert.notEqual(next.state.target.position,target.position);
+    state=next.state;
+  }
+  assert.equal(seen.size,6);
+  assert.equal(targetFor(3).kind,'squeeze');
+  assert.equal(targetFor(3).strength,.45);
+  assert.equal(targetFor(5).kind,'punch');
+  assert.equal(targetFor(5).strength,.55);
+});
+
+test('inactive spots preview their next actual variant and do not morph when selected', () => {
+  for(let index=0;index<70;index++) {
+    const before=targetsOnFace(index);
+    const after=targetsOnFace(index+1);
+    assert.equal(before.length,7);
+    assert.deepEqual(before[targetFor(index).position],targetFor(index));
+    for(let position=0;position<7;position++) {
+      assert.equal(before[position].position,position);
+      if(position!==targetFor(index).position) assert.deepEqual(before[position],after[position]);
+    }
+  }
 });

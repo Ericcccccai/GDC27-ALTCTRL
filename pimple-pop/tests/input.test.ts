@@ -1,221 +1,156 @@
-import assert from 'node:assert/strict';
 import test from 'node:test';
-import { KeyboardInput, SerialInput, SerialLineParser, type ActionEvent } from '../src/input';
+import assert from 'node:assert/strict';
+import { KeyboardTestInput, type KeyboardActionEvent, GestureDetector, DEFAULT_GESTURES, parseGestureSettings, validateGestureSettings } from '../src/input';
+import { SensorStore, type SensorBatch } from '../src/SensorStore';
+import type { Side, Vector } from '../src/sensors';
+const arm = (d: GestureDetector, at=0) => { d.sample(0,0,at); d.sample(0,0,at+200); };
+test('noise, quiet arm, mixed normalized evidence, tie policy and strength clamp', () => {
+  const d = new GestureDetector(); d.sample(3,0,0); assert.equal(d.flush(200),null);
+  arm(d,300); d.sample(.1,.1,510); assert.equal(d.flush(700),null);
+  d.sample(.5,.8,710); const event=d.flush(810)!;
+  assert.equal(event.kind,'squeeze'); assert.equal(event.strength,.8/1.2);
+  arm(d,1200); d.sample(3,3,1410); assert.equal(d.flush(1510)?.kind,'punch');
+  arm(d,1900); d.sample(5,0,2110); assert.equal(d.flush(2210)?.strength,1);
+});
+test('bounded peak collection, sustained motion never repeats, cooldown and quiet rearm', () => {
+  const d = new GestureDetector(); arm(d); d.sample(.3,0,210); d.sample(-1,0,230); d.sample(0,0,240);
+  assert.equal(d.flush(300),null); assert.equal(d.flush(310)?.xPeak,1);
+  for(let at=320;at<2000;at+=20) { d.sample(1,0,at); assert.equal(d.flush(at),null); }
+  arm(d,2000); d.sample(0,1,2210); assert.equal(d.flush(2310)?.kind,'squeeze');
+});
+test('cancel discards an impact and requires new quiet evidence', () => {
+  const d=new GestureDetector(); arm(d); d.sample(2,0,210); d.cancel(); assert.equal(d.flush(400),null);
+  d.sample(2,0,410); assert.equal(d.flush(600),null); arm(d,700); d.sample(2,0,910); assert.ok(d.flush(1010));
+});
+function batch(at:number, samples: {side:Side; acceleration:Vector}[], active:Side[]=['L','R']): SensorBatch {
+  const frame=(side:Side,acceleration:Vector) => ({side,acceleration,sequence:at,timeUs:at*1000,gyro:[0,0,0] as Vector});
+  return { throughAt:at, overflow:false, links:(['L','R'] as Side[]).map(side=>({side,path:'test',connected:active.includes(side),message:'test',receivedAt:at,frames:at,rejected:0,frame:frame(side,[1,0,0])})), samples:samples.map(s=>({side:s.side,at,frame:frame(s.side,s.acceleration)})) };
+}
+const quiet=(s:SensorStore,at:number,active:Side[]=['L','R']) => s.accept(batch(at,active.map(side=>({side,acceleration:[1,0,0]})),active),at);
+for(const side of ['L','R'] as Side[]) test(`${side} alone handles either gesture and preserves a spike between 20 Hz snapshots`,()=>{
+  const s=new SensorStore(); const events:unknown[]=[]; s.onAction=e=>events.push(e); s.setEnabled(true,0);
+  quiet(s,50,[side]); quiet(s,100,[side]); quiet(s,300,[side]);
+  s.accept(batch(350,[{side,acceleration:[3,0,0]},{side,acceleration:[1,0,0]}],[side]),350);
+  s.accept(batch(450,[],[side]),450); assert.equal(s.lastAction?.kind,'punch'); assert.equal(events.length,1);
+  quiet(s,800,[side]); quiet(s,1000,[side]); s.accept(batch(1050,[{side,acceleration:[1,0,2]}],[side]),1050);
+  s.accept(batch(1150,[],[side]),1150); assert.equal(s.lastAction?.kind,'squeeze'); assert.equal(events.length,2);
+});
+test('both boards aggregate once; reset, stale, reconnect, overflow and pause cancel pending input',()=>{
+  for(const reason of ['reset','stale','reconnect','overflow','pause']) {
+    const s=new SensorStore(); let count=0; s.onAction=()=>count++; s.setEnabled(true,0); quiet(s,50); quiet(s,100); quiet(s,300);
+    s.accept(batch(350,[{side:'L',acceleration:[3,0,0]},{side:'R',acceleration:[-1,0,0]}]),350);
+    if(reason==='reset') s.reset(['L'],360);
+    if(reason==='stale') s.advance(1400);
+    if(reason==='reconnect') { s.disconnect(360); quiet(s,400); }
+    if(reason==='overflow') s.accept({...batch(400,[]),overflow:true},400);
+    if(reason==='pause') { s.setEnabled(false,360); s.setEnabled(true,370); }
+    s.accept(batch(450,[]),450); assert.equal(count,0,reason);
+  }
+  const s=new SensorStore(); let count=0; s.onAction=()=>count++; s.setEnabled(true,0); quiet(s,50); quiet(s,100); quiet(s,300);
+  s.accept(batch(350,[{side:'L',acceleration:[3,0,0]},{side:'R',acceleration:[-1,0,0]}]),350); s.accept(batch(450,[]),450); s.advance(600); assert.equal(count,1);
+});
 
-function keyboard() {
-  let now = 0;
-  const target = Object.assign(new EventTarget(), {
-    document: Object.assign(new EventTarget(), { hidden: false }),
-    performance: { now: () => now },
-  });
-  const actions: ActionEvent[] = [];
-  const input = new KeyboardInput(target as unknown as Window, action => actions.push(action));
-  const key = (type: string, key: string, repeat = false) => {
+test('delayed batch respects window and buffered samples cannot cross reset or enable', () => {
+  const s=new SensorStore(); const events:string[]=[]; s.onAction=e=>events.push(e.kind); s.setEnabled(true,0);
+  quiet(s,50); quiet(s,100); quiet(s,300);
+  const early=batch(350,[{side:'L',acceleration:[1.6,0,0]}]);
+  const late=batch(550,[{side:'L',acceleration:[1,0,1.2]}]);
+  s.accept({...late,samples:[...early.samples,...late.samples]},550);
+  assert.deepEqual(events,['punch']);
+  s.setEnabled(false,600); s.setEnabled(true,1000);
+  s.accept({...batch(1000,[]), samples:[...batch(650,[{side:'L',acceleration:[1,0,0]}]).samples,...batch(850,[{side:'L',acceleration:[1,0,0]}]).samples,...batch(900,[{side:'L',acceleration:[3,0,0]}]).samples]},1000);
+  assert.deepEqual(events,['punch']);
+  s.reset(['L'],1100);
+  s.accept({...batch(1150,[]), samples:batch(1050,[{side:'L',acceleration:[3,0,0]}]).samples},1150);
+  assert.equal(s.signals.L.baseline,null);
+  quiet(s,1200); assert.deepEqual(s.signals.L.baseline,[1,0,0]);
+});
+
+test('wall clock cannot close a window before the next batch delivers its captured peaks', () => {
+  const s=new SensorStore(); s.setEnabled(true,0); quiet(s,50); quiet(s,100); quiet(s,300);
+  s.accept({...batch(375,[]),samples:batch(350,[{side:'L',acceleration:[1.3,0,0]}]).samples},375);
+  s.advance(450); assert.equal(Boolean(s.lastAction),false);
+  s.accept({...batch(475,[]),samples:batch(440,[{side:'L',acceleration:[1,0,1.2]}]).samples},475);
+  assert.equal(s.lastAction?.kind,'squeeze');
+  assert.ok(Math.abs(s.lastAction!.strength-.95)<1e-9);
+});
+
+test('power scales independently of detection and the other gesture', () => {
+  const fire = (punchFull:number,squeezeFull:number,x:number,z:number) => {
+    const d=new GestureDetector(); d.settings={...DEFAULT_GESTURES,punchFull,squeezeFull}; arm(d); d.sample(x,z,210); return d.flush(310)!;
+  };
+  assert.equal(fire(1.2,1.2,.9,0).strength,.75);
+  assert.equal(fire(3,1.2,.9,0).strength,.3);
+  assert.equal(fire(6,1.2,.9,0).strength,.15);
+  assert.equal(fire(6,1.2,0,.9).strength,.75);
+  assert.equal(fire(6,3,0,.9).strength,.3);
+  assert.equal(fire(3,1.2,100,0).strength,1);
+});
+test('settings reject invalid storage and bounds, save valid tuning, and cancel pending gestures',()=>{
+  for(const raw of [null,'bad','{}','null','[]',JSON.stringify({...DEFAULT_GESTURES,punchFull:0}),JSON.stringify({...DEFAULT_GESTURES,squeezeFull:9}),JSON.stringify({...DEFAULT_GESTURES,punchThreshold:4})]) assert.equal(parseGestureSettings(raw),null);
+  assert.equal(validateGestureSettings({...DEFAULT_GESTURES,punchFull:NaN}),null);
+  assert.equal(validateGestureSettings({...DEFAULT_GESTURES,punchFull:'3'}),null);
+  let saved:string|null=null;
+  const storage={getItem:()=>saved,setItem:(_key:string,value:string)=>{saved=value;}};
+  const s=new SensorStore(); s.loadSettings(storage);
+  arm(s.detector); s.detector.sample(1,0,210);
+  assert.equal(s.updateSettings({...DEFAULT_GESTURES,punchFull:6},220),'saved');
+  assert.equal(s.detector.flush(400),null);
+  const reloaded=new SensorStore(); reloaded.loadSettings(storage); assert.equal(reloaded.detector.settings.punchFull,6); assert.equal(reloaded.detector.settings.squeezeFull,1.2);
+  assert.equal(reloaded.updateSettings({...DEFAULT_GESTURES,punchFull:-1}),'invalid'); assert.equal(reloaded.detector.settings.punchFull,6);
+  const unavailable=new SensorStore(); unavailable.loadSettings({getItem:()=>{throw Error('denied');},setItem:()=>{throw Error('denied');}});
+  assert.equal(unavailable.updateSettings({...DEFAULT_GESTURES,punchFull:4}),'session'); assert.equal(unavailable.detector.settings.punchFull,4);
+});
+
+class KeyboardWindow extends EventTarget {
+  now = 0;
+  performance = { now: () => this.now };
+  document = Object.assign(new EventTarget(), { hidden: false });
+  key(type: 'keydown' | 'keyup', key: string, repeat = false): void {
     const event = Object.assign(new Event(type, { cancelable: true }), { key, repeat });
-    target.dispatchEvent(event);
-    return event;
-  };
-  return { target, input, actions, key, time: (value: number) => { now = value; } };
-}
-
-test('keyboard charges on hold, clamps strength, and suppresses repeats', () => {
-  const k = keyboard();
-  assert.equal(k.key('keydown', 'ArrowUp').defaultPrevented, true);
-  k.time(600);
-  k.key('keydown', 'ArrowUp', true);
-  assert.deepEqual(k.input.getCharge(), { kind: 'punch', strength: 0.5 });
-  k.key('keyup', 'ArrowUp');
-  k.key('keyup', 'ArrowUp');
-  assert.deepEqual(k.actions, [{ kind: 'punch', strength: 0.5, source: 'keyboard' }]);
-  k.key('keydown', 'ArrowRight');
-  k.time(10000);
-  k.key('keyup', 'ArrowRight');
-  assert.equal(k.actions[1]?.strength, 1);
-  k.input.destroy();
-});
-
-test('left and right form one squeeze and release the final key', () => {
-  const k = keyboard();
-  k.key('keydown', 'ArrowLeft');
-  k.time(300);
-  k.key('keydown', 'ArrowRight');
-  k.key('keyup', 'ArrowLeft');
-  assert.equal(k.actions.length, 0);
-  k.time(900);
-  k.key('keyup', 'ArrowRight');
-  assert.deepEqual(k.actions, [{ kind: 'squeeze', strength: 0.75, source: 'keyboard' }]);
-  k.input.destroy();
-});
-
-test('first gesture wins until every tracked key is released', () => {
-  for (const [first, second] of [['ArrowUp', 'ArrowLeft'], ['ArrowRight', 'ArrowUp']]) {
-    const k = keyboard();
-    k.key('keydown', first!);
-    k.key('keydown', second!);
-    k.time(1200);
-    k.key('keyup', first!);
-    k.key('keydown', first!);
-    k.key('keyup', second!);
-    k.key('keyup', first!);
-    assert.equal(k.actions.length, 1);
-    assert.equal(k.actions[0]?.kind, first === 'ArrowUp' ? 'punch' : 'squeeze');
-    k.key('keydown', second!);
-    k.key('keyup', second!);
-    assert.equal(k.actions.length, 2);
-    k.input.destroy();
-  }
-});
-
-test('blur, hiding, reset, and destroy cancel without firing', () => {
-  const k = keyboard();
-  for (const cancel of [
-    () => k.target.dispatchEvent(new Event('blur')),
-    () => {
-      k.target.document.hidden = true;
-      k.target.document.dispatchEvent(new Event('visibilitychange'));
-    },
-    () => k.input.reset(),
-    () => k.input.destroy(),
-  ]) {
-    k.key('keydown', 'ArrowUp');
-    cancel();
-    k.key('keyup', 'ArrowUp');
-    assert.equal(k.input.getCharge(), null);
-  }
-  k.key('keydown', 'ArrowLeft');
-  k.key('keyup', 'ArrowLeft');
-  assert.deepEqual(k.actions, []);
-});
-
-test('parser preserves every possible chunk boundary and accepts CRLF', () => {
-  const data = 'PUNCH,0.83\r\nSQUEEZE,0.71\nPUNCH,0\nSQUEEZE,1.00\n';
-  const expected: ActionEvent[] = [
-    { kind: 'punch', strength: 0.83, source: 'serial' },
-    { kind: 'squeeze', strength: 0.71, source: 'serial' },
-    { kind: 'punch', strength: 0, source: 'serial' },
-    { kind: 'squeeze', strength: 1, source: 'serial' },
-  ];
-  for (let split = 0; split <= data.length; split++) {
-    const parser = new SerialLineParser();
-    assert.deepEqual([...parser.push(data.slice(0, split)), ...parser.push(data.slice(split))], expected);
-  }
-  const parser = new SerialLineParser();
-  assert.deepEqual([...data].flatMap(char => parser.push(char)), expected);
-});
-
-test('parser rejects invalid records, out of range values, and oversized records', () => {
-  const parser = new SerialLineParser();
-  const invalid = ['punch,0.5', 'PUNCH, 0.5', ' PUNCH,0.5', 'PUNCH,0.5 ', 'PUNCH,+0.5',
-    'PUNCH,-0.5', 'PUNCH,1.01', 'PUNCH,2', 'PUNCH,NaN', 'PUNCH,Infinity', 'PUNCH,1e-1',
-    'PUNCH,.5', 'PUNCH,00.5', 'PUNCH,0.', 'PUNCH,0.5,extra', 'PUNCH,0.5\r\r', '', 'SQUEEZE'];
-  assert.deepEqual(parser.push(invalid.join('\n') + '\n'), []);
-  assert.deepEqual(parser.push('x'.repeat(1_000_000)), []);
-  assert.deepEqual(parser.push('PUNCH,1\n'), []);
-  assert.deepEqual(parser.push('PUNCH,1\n'), [{ kind: 'punch', strength: 1, source: 'serial' }]);
-  assert.deepEqual(parser.push('PUNCH,0.' + '0'.repeat(100) + '\n'), []);
-  parser.push('PUNCH,0.');
-  parser.reset();
-  assert.deepEqual(parser.push('5\n'), []);
-});
-
-test('serial disconnect cancels reading, releases lock, and closes exactly once', async () => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-  let cancelled = 0;
-  let closed = 0;
-  let requested = 0;
-  const actions: ActionEvent[] = [];
-  const statuses: string[] = [];
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) { controller.enqueue(new TextEncoder().encode('PUNCH,0.5\n')); },
-    cancel() { cancelled++; },
-  });
-  const port = {
-    readable: stream,
-    async open(options: { baudRate: number }) { assert.equal(options.baudRate, 115200); },
-    async close() { assert.equal(stream.locked, false); closed++; },
-  };
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: {} });
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true, value: { serial: { async requestPort() { requested++; return port; } } },
-  });
-  try {
-    assert.equal(SerialInput.isSupported(), true);
-    const input = new SerialInput(action => actions.push(action));
-    input.onStatus = status => statuses.push(status);
-    await Promise.all([input.connect(), input.connect()]);
-    await input.disconnect();
-    await input.disconnect();
-    assert.equal(requested, 1);
-    assert.equal(cancelled, 1);
-    assert.equal(closed, 1);
-    assert.deepEqual(actions, [{ kind: 'punch', strength: 0.5, source: 'serial' }]);
-    assert.equal(statuses.at(-1), 'Disconnected');
-  } finally {
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
-    else Reflect.deleteProperty(globalThis, 'window');
-    if (originalNavigator) Object.defineProperty(globalThis, 'navigator', originalNavigator);
-    else Reflect.deleteProperty(globalThis, 'navigator');
-  }
-});
-
-async function withSerialPort(port: unknown, run: () => Promise<void>) {
-  const originals = ['window', 'navigator'].map(key => Object.getOwnPropertyDescriptor(globalThis, key));
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: {} });
-  Object.defineProperty(globalThis, 'navigator', {
-    configurable: true, value: { serial: { async requestPort() { return port; } } },
-  });
-  try { await run(); } finally {
-    ['window', 'navigator'].forEach((key, i) => {
-      if (originals[i]) Object.defineProperty(globalThis, key, originals[i]!);
-      else Reflect.deleteProperty(globalThis, key);
-    });
+    this.dispatchEvent(event);
   }
 }
-
-test('disconnect while opening closes the port without delivering buffered actions', async () => {
-  let finishOpen!: () => void;
-  let signalOpening!: () => void;
-  const opening = new Promise<void>(resolve => { signalOpening = resolve; });
-  const opened = new Promise<void>(resolve => { finishOpen = resolve; });
-  let closes = 0;
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) { controller.enqueue(new TextEncoder().encode('PUNCH,1\n')); },
-  });
-  await withSerialPort({
-    readable: stream,
-    async open() { signalOpening(); await opened; },
-    async close() { assert.equal(stream.locked, false); closes++; },
-  }, async () => {
-    const actions: ActionEvent[] = [];
-    const input = new SerialInput(action => actions.push(action));
-    const connect = input.connect();
-    await opening;
-    const disconnect = input.disconnect();
-    finishOpen();
-    await Promise.all([connect, disconnect]);
-    assert.deepEqual(actions, []);
-    assert.equal(closes, 1);
-  });
+test('keyboard test input is opt-in, charges on hold, fires on release and suppresses repeat', () => {
+  const win = new KeyboardWindow(); const events: KeyboardActionEvent[] = [];
+  const keyboard = new KeyboardTestInput(win as unknown as Window, action => events.push(action));
+  win.key('keydown','ArrowUp'); win.now=1500; win.key('keyup','ArrowUp'); assert.equal(events.length,0);
+  keyboard.setEnabled(true); win.key('keydown','ArrowUp'); win.now=2100;
+  win.key('keydown','ArrowUp',true); win.key('keydown','ArrowUp');
+  assert.deepEqual(keyboard.getCharge(),{kind:'punch',strength:.5}); assert.equal(events.length,0);
+  win.now=4000; win.key('keyup','ArrowUp'); win.key('keyup','ArrowUp');
+  assert.deepEqual(events,[{kind:'punch',strength:1,source:'keyboard'}]);
+  keyboard.destroy(); win.key('keydown','ArrowUp'); win.key('keyup','ArrowUp'); assert.equal(events.length,1);
 });
-
-test('serial read failures release the stream and report a status', async () => {
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) { controller.error(new Error('Device removed')); },
-  });
-  let closes = 0;
-  await withSerialPort({
-    readable: stream,
-    async open() {},
-    async close() { assert.equal(stream.locked, false); closes++; },
-  }, async () => {
-    let report!: (status: string) => void;
-    const failed = new Promise<string>(resolve => { report = resolve; });
-    const input = new SerialInput(() => assert.fail('No action expected'));
-    input.onStatus = status => { if (status.startsWith('Serial error:')) report(status); };
-    await input.connect();
-    assert.match(await failed, /Device removed/);
-    await input.disconnect();
-    assert.equal(closes, 1);
-  });
+test('both squeeze keys share one charge until the final squeeze key is released', () => {
+  const win = new KeyboardWindow(); const events: KeyboardActionEvent[]=[];
+  const keyboard=new KeyboardTestInput(win as unknown as Window,action=>events.push(action)); keyboard.setEnabled(true);
+  win.key('keydown','ArrowLeft'); win.now=300; win.key('keydown','ArrowRight');
+  win.now=600; win.key('keyup','ArrowLeft'); assert.equal(events.length,0);
+  win.now=1200; win.key('keyup','ArrowRight');
+  assert.deepEqual(events,[{kind:'squeeze',strength:1,source:'keyboard'}]); keyboard.destroy();
+});
+test('the first conflicting gesture wins and others never become deferred actions', () => {
+  const win = new KeyboardWindow(); const events: KeyboardActionEvent[]=[];
+  const keyboard=new KeyboardTestInput(win as unknown as Window,action=>events.push(action)); keyboard.setEnabled(true);
+  win.key('keydown','ArrowUp'); win.key('keydown','ArrowLeft'); win.now=600; win.key('keyup','ArrowUp');
+  win.key('keydown','ArrowRight'); win.key('keyup','ArrowLeft'); win.key('keyup','ArrowRight');
+  assert.deepEqual(events,[{kind:'punch',strength:.5,source:'keyboard'}]);
+  win.key('keydown','ArrowRight'); win.now=1800; win.key('keyup','ArrowRight'); assert.equal(events.length,2);
+  assert.equal(events[1].kind,'squeeze'); keyboard.destroy();
+});
+test('blur, hidden, pause and mode changes cancel held input; repeats cannot resume it', () => {
+  for(const reason of ['blur','hidden','disable','cancel']) {
+    const win = new KeyboardWindow(); const events: KeyboardActionEvent[]=[];
+    const keyboard=new KeyboardTestInput(win as unknown as Window,action=>events.push(action)); keyboard.setEnabled(true);
+    win.key('keydown','ArrowUp'); win.now=1000;
+    if(reason==='blur') win.dispatchEvent(new Event('blur'));
+    if(reason==='hidden') { win.document.hidden=true; win.document.dispatchEvent(new Event('visibilitychange')); }
+    if(reason==='disable') { keyboard.setEnabled(false); keyboard.setEnabled(true); }
+    if(reason==='cancel') keyboard.cancel();
+    win.key('keydown','ArrowUp',true); win.key('keyup','ArrowUp'); assert.equal(events.length,0,reason);
+    assert.equal(keyboard.getCharge(),null);
+    win.key('keydown','ArrowUp'); win.now=2200; win.key('keyup','ArrowUp'); assert.equal(events.length,1,reason);
+    keyboard.destroy();
+  }
 });

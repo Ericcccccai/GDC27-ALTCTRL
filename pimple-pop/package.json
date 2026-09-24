@@ -12,7 +12,8 @@
     "test:browser": "playwright test"
   },
   "dependencies": {
-    "phaser": "^3.90.0"
+    "phaser": "^3.90.0",
+    "serialport": "^13.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
