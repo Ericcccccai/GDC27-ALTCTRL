@@ -51,3 +51,7 @@ Open **Sensor Lab**, enable **Keyboard test mode**, then choose **Back to game**
 Hold **Up arrow** to charge a punch, or **Left / Right arrow** to charge a squeeze. Release to act. Charge rises linearly from 0% to 100% over 1.2 seconds. The meter and prompts switch to keyboard instructions, and the game displays **KEYBOARD TEST MODE**. Holding both squeeze arrows produces one action when the last is released. Auto-repeat is ignored, and the first gesture wins when conflicting keys overlap until all are released.
 
 Sensor gameplay is disabled while testing, but live diagnostics continue. Opening the lab, switching modes, losing focus, hiding the page, countdown, results, and restart cancel held input. Returning to sensor play requires fresh quiet readings before detection can rearm. Turn the switch off or reload to return to physical play. Missing sensors never enable keyboard testing automatically.
+
+## Recovery input lock
+
+During the explicit `recovering` game phase, both input paths are disabled and pending actions are cancelled. The handler also rejects actions unless the phase is `playing`. Focus changes, Sensor Lab, mode toggles and calibration cannot bypass this lock. Recovery completion cancels input again, so held keyboard keys and buffered sensor frames cannot fire afterward; sensor input needs fresh quiet rearming. The round clock keeps running, and round expiry clears recovery. See the game README for severity, probability and duration rules.

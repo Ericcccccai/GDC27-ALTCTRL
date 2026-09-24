@@ -21,6 +21,9 @@ export function parseGestureSettings(serialized: string | null): GestureSettings
   try { return validateGestureSettings(JSON.parse(serialized ?? 'null')); } catch { return null; }
 }
 
+/** Shared game power scale, after zero subtraction and dead-zone removal. */
+export const pressureStrength = (peak: number, full: number): number => Math.min(1, Math.max(0, peak / full));
+
 /** One shared window across both boards. Equal normalized evidence selects punch. */
 export class GestureDetector {
   settings = { ...DEFAULT_GESTURES };
@@ -48,7 +51,7 @@ export class GestureDetector {
     const { x, z } = this.pending;
     this.pending = null; this.quietSince = null; this.cooldownUntil = at + 300;
     const kind = x / this.settings.punchThreshold >= z / this.settings.squeezeThreshold ? 'punch' : 'squeeze';
-    return { kind, source: 'sensor', xPeak: x, zPeak: z, strength: Math.min(1, (kind === 'punch' ? x / this.settings.punchFull : z / this.settings.squeezeFull)) };
+    return { kind, source: 'sensor', xPeak: x, zPeak: z, strength: pressureStrength(kind === 'punch' ? x : z, kind === 'punch' ? this.settings.punchFull : this.settings.squeezeFull) };
   }
 }
 

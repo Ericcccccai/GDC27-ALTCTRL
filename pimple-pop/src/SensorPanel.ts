@@ -51,8 +51,31 @@ export function mountSensorPanel(onVisibility: (visible: boolean) => void, onKey
     { key: 'punchThreshold', label: 'Punch detection threshold (g)', help: 'Minimum motion to detect a punch, separate from power.' },
     { key: 'squeezeThreshold', label: 'Squeeze detection threshold (g)', help: 'Minimum motion to detect a squeeze, separate from power.' },
   ] as const;
-  tuning.innerHTML = `<div><strong>Power sensitivity</strong><p>Small hits too powerful? Increase the punch value. Adjust squeeze independently. Higher values make the game less sensitive.</p><p id="last-gesture">No gameplay gesture detected yet</p><p id="tuning-status" role="status">Settings save in this browser. Return to the game to test.</p></div>${controls.map(({key,label,help}) => `<label>${label}<input data-gesture="${key}" type="number" min="0.05" max="8" step="0.05" value="${sensors.detector.settings[key]}" aria-describedby="help-${key}"><span class="tuning-help" id="help-${key}">${help}</span></label>`).join('')}`;
+  tuning.innerHTML = `<div><strong>Power sensitivity</strong><p>Small hits too powerful? Increase the punch value. Adjust squeeze independently. Higher values make the game less sensitive.</p><p id="last-gesture">No gameplay gesture detected yet</p><p id="tuning-status" role="status">Settings save in this browser. Test motion here while game scoring stays paused.</p></div>${controls.map(({key,label,help}) => `<label>${label}<input data-gesture="${key}" type="number" min="0.05" max="8" step="0.05" value="${sensors.detector.settings[key]}" aria-describedby="help-${key}"><span class="tuning-help" id="help-${key}">${help}</span></label>`).join('')}`;
   get('.sensor-tools').after(tuning);
+  const pressure = document.createElement('section');
+  pressure.className = 'sensor-pressure';
+  pressure.setAttribute('aria-label', 'Game pressure');
+  pressure.innerHTML = `<div class="pressure-intro"><h2>Game pressure</h2><p>Live shows current motion. Peak keeps the highest reading from the last 1 second, so quick hits stay visible.</p><p id="pressure-status">Waiting for fresh, zeroed sensor data.</p></div>${(['punch', 'squeeze'] as const).map(kind => `<article class="pressure-card" data-pressure="${kind}"><h2>${kind === 'punch' ? 'Hit / Punch' : 'Squeeze'} pressure</h2><p class="pressure-values"><span>Live <strong data-live>—</strong></span><span>Peak · 1 s <strong data-peak>—</strong></span></p><div class="pressure-track"><div class="pressure-fill" role="progressbar" aria-label="${kind === 'punch' ? 'Punch' : 'Squeeze'} live pressure" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Waiting for sensor data"></div><span class="pressure-trigger" aria-hidden="true"></span></div><p class="pressure-caption" data-trigger></p></article>`).join('')}<p class="pressure-footnote">Uses the game’s unsmoothed X (punch) and Z (squeeze) motion, after zero and dead zone, taking the strongest live sensor. Percent = motion ÷ your 100% power setting, capped at 100%. The detection marker is separate from the target pressure needed to pop a pimple. These readings describe acceleration, not measured physical force.</p>`;
+  tuning.after(pressure);
+  const renderPressure = () => {
+    const reading = sensors.pressure();
+    get('#pressure-status').textContent = reading.ready ? 'Sensors live · game scoring paused in this lab' : 'Waiting for fresh, zeroed sensor data.';
+    for (const kind of ['punch', 'squeeze'] as const) {
+      const card = get(`[data-pressure="${kind}"]`);
+      const value = reading[kind];
+      const percent = Math.round(value.live * 100);
+      card.querySelector('[data-live]')!.textContent = reading.ready ? `${percent}%` : '—';
+      card.querySelector('[data-peak]')!.textContent = reading.ready ? `${Math.round(value.peak * 100)}%` : '—';
+      const bar = card.querySelector<HTMLElement>('[role="progressbar"]')!;
+      bar.style.width = `${reading.ready ? value.live * 100 : 0}%`;
+      if (reading.ready) bar.setAttribute('aria-valuenow', String(percent)); else bar.removeAttribute('aria-valuenow');
+      bar.setAttribute('aria-valuetext', reading.ready ? `${percent}% current pressure` : 'Waiting for sensor data');
+      card.querySelector<HTMLElement>('.pressure-trigger')!.style.left = `${value.trigger * 100}%`;
+      card.querySelector('[data-trigger]')!.textContent = `Detection starts at ${(value.trigger * 100).toFixed(1)}% · marker on bar`;
+    }
+  };
+  renderPressure();
   tuning.addEventListener('change', event => {
     const input = event.target as HTMLInputElement;
     const key = input.dataset.gesture as keyof typeof sensors.detector.settings;
@@ -60,9 +83,10 @@ export function mountSensorPanel(onVisibility: (visible: boolean) => void, onKey
     const result = sensors.updateSettings({ ...sensors.detector.settings, [key]: Number(input.value) });
     get('#tuning-status').textContent = result === 'invalid'
       ? 'Use 0.05 to 8 g. The 100% power value must be at least its detection threshold. Previous setting kept.'
-      : result === 'saved' ? 'Saved. The next gesture uses these settings. Return to the game to test.'
+      : result === 'saved' ? 'Saved. Live pressure updated; previous peak history cleared. Test motion here.'
       : 'Applied for this session. Browser storage is unavailable.';
     input.value = String(sensors.detector.settings[key]);
+    renderPressure();
   });
   window.addEventListener('sensor-lab', show);
   const timer = window.setInterval(() => {
@@ -95,6 +119,7 @@ export function mountSensorPanel(onVisibility: (visible: boolean) => void, onKey
     const action = sensors.lastAction;
     get('#last-gesture').textContent = action ? `Last gameplay gesture: ${action.kind} ${Math.round(action.strength*100)}% · X ${action.xPeak.toFixed(3)} g · Z ${action.zPeak.toFixed(3)} g` : 'No gameplay gesture detected yet';
     if (panel.hidden) return;
+    renderPressure();
     for (const { axis } of axes) {
       get(`#values-${axis}`).textContent = SIDES.map(side => `${side} ${output[side] ? number(output[side]![axis])+' g' : '—'}`).join('     ');
       get(`#range-${axis}`).textContent = SIDES.some(side => Math.abs(output[side]?.[axis] ?? 0)>1) ? 'Outside graph range. Read the numbers above.' : 'Small changes settle at zero.';

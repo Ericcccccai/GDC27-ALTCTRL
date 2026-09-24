@@ -1,5 +1,5 @@
 export type ActionKind = 'punch' | 'squeeze';
-export type Phase = 'ready' | 'countdown' | 'playing' | 'results';
+export type Phase = 'ready' | 'countdown' | 'playing' | 'recovering' | 'results';
 export const PIMPLE_TYPES = {
   1: { name: 'Small whitehead', kind: 'punch', strength: 0.35, size: 58 },
   2: { name: 'Deep bump', kind: 'squeeze', strength: 0.65, size: 76 },
@@ -10,7 +10,8 @@ export const PIMPLE_TYPES = {
 } as const;
 export const PIMPLE_SEQUENCE = [1, 2, 6, 4, 5, 3] as const;
 export interface Target { kind: ActionKind; strength: number; position: number; variant: keyof typeof PIMPLE_TYPES }
-export interface GameState { phase: Phase; remainingMs: number; score: number; combo: number; bestCombo: number; popped: number; attempts: number; target: Target }
+export interface Recovery { remainingMs: number; durationMs: number; severe: boolean }
+export interface GameState { recovery: Recovery | null; phase: Phase; remainingMs: number; score: number; combo: number; bestCombo: number; popped: number; attempts: number; target: Target }
 export const ROUND_MS = 45_000;
 export function targetFor(index: number): Target {
   const variant = PIMPLE_SEQUENCE[index % PIMPLE_SEQUENCE.length];
@@ -28,20 +29,37 @@ export function targetsOnFace(index: number): Target[] {
   return targets;
 }
 export function createGame(): GameState {
-  return { phase: 'ready', remainingMs: ROUND_MS, score: 0, combo: 0, bestCombo: 0, popped: 0, attempts: 0, target: targetFor(0) };
+  return { recovery: null, phase: 'ready', remainingMs: ROUND_MS, score: 0, combo: 0, bestCombo: 0, popped: 0, attempts: 0, target: targetFor(0) };
 }
 export function startGame(): GameState { return { ...createGame(), phase: 'playing' }; }
 export function tick(state: GameState, deltaMs: number): GameState {
-  if (state.phase !== 'playing') return state;
-  const remainingMs = Math.max(0, state.remainingMs - Math.max(0, Number.isFinite(deltaMs) ? deltaMs : 0));
-  return { ...state, remainingMs, phase: remainingMs === 0 ? 'results' : 'playing' };
+  if (state.phase !== 'playing' && state.phase !== 'recovering') return state;
+  const elapsed = Math.max(0, Number.isFinite(deltaMs) ? deltaMs : 0);
+  const remainingMs = Math.max(0, state.remainingMs - elapsed);
+  if (!remainingMs) return { ...state, remainingMs, recovery: null, phase: 'results' };
+  const recoveryMs = Math.max(0, (state.recovery?.remainingMs ?? 0) - elapsed);
+  const recovery = state.recovery && recoveryMs > 0 ? { ...state.recovery, remainingMs: recoveryMs } : null;
+  return { ...state, remainingMs, recovery, phase: recovery ? 'recovering' : 'playing' };
 }
 export type Outcome = 'correct' | 'weak' | 'wrong' | 'ignored';
-export function act(state: GameState, kind: ActionKind, strength: number): { state: GameState; outcome: Outcome; points: number } {
+export function act(state: GameState, kind: ActionKind, strength: number, random: () => number = Math.random): { state: GameState; outcome: Outcome; points: number } {
   if (state.phase !== 'playing' || state.remainingMs <= 0) return { state, outcome: 'ignored', points: 0 };
   const force = Number.isFinite(strength) ? Math.min(1, Math.max(0, strength)) : 0;
   const outcome = kind !== state.target.kind ? 'wrong' : force < state.target.strength ? 'weak' : 'correct';
-  if (outcome !== 'correct') return { state: { ...state, attempts: state.attempts + 1, combo: 0, score: Math.max(0, state.score - (outcome === 'wrong' ? 25 : 0)) }, outcome, points: outcome === 'wrong' ? -25 : 0 };
+  if (outcome !== 'correct') {
+    let recovery: Recovery | null = null;
+    if (outcome === 'wrong') {
+      const severe = force >= (Math.round(state.target.strength * 100) + 20) / 100;
+      if (severe || random() < 0.20) {
+        const severity = Math.min(1, Math.max(0, (force - state.target.strength) / (1 - state.target.strength)));
+        const durationMs = Math.round(3000 + 2000 * severity);
+        recovery = { remainingMs: durationMs, durationMs, severe };
+      }
+    }
+    return { state: { ...state, phase: recovery ? 'recovering' : 'playing', recovery,
+      attempts: state.attempts + 1, combo: 0, score: Math.max(0, state.score - (outcome === 'wrong' ? 25 : 0)) },
+      outcome, points: outcome === 'wrong' ? -25 : 0 };
+  }
   const combo = state.combo + 1;
   const points = 100 + Math.min(5, Math.floor(combo / 3)) * 25 + Math.round(force * 50);
   return { state: { ...state, score: state.score + points, combo, bestCombo: Math.max(state.bestCombo, combo), popped: state.popped + 1, attempts: state.attempts + 1, target: targetFor(state.popped + 1) }, outcome, points };

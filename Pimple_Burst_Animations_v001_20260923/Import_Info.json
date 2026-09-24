@@ -1,0 +1,95 @@
+{
+  "asset_version": "Pimple_Burst_Animations_v001_20260923",
+  "source_psd": "/Users/zhangyao/Desktop/01_创作开发 Creation/项目 Projects/GameSqueezingPimples/Face_Assets_v001_20260908/Source/Face_Assets_v001_20260908.psd",
+  "preview_gif": "Preview/All_Pimples_Burst_Preview.gif",
+  "frame_count": 9,
+  "suggested_playback_fps": 12,
+  "groups": [
+    {
+      "pimple_id": "Pimple_01",
+      "folder": "Sprites/Pimple_01_Burst",
+      "file_pattern": "Pimple_01_Burst_Frame_{frame:02d}.png",
+      "frame_count": 9,
+      "canvas_size_px": [
+        286,
+        178
+      ],
+      "source_crop_rect_px": [
+        225,
+        1360,
+        511,
+        1538
+      ],
+      "alpha": true
+    },
+    {
+      "pimple_id": "Pimple_02",
+      "folder": "Sprites/Pimple_02_Burst",
+      "file_pattern": "Pimple_02_Burst_Frame_{frame:02d}.png",
+      "frame_count": 9,
+      "canvas_size_px": [
+        246,
+        230
+      ],
+      "source_crop_rect_px": [
+        1319,
+        1280,
+        1565,
+        1510
+      ],
+      "alpha": true
+    },
+    {
+      "pimple_id": "Pimple_03",
+      "folder": "Sprites/Pimple_03_Burst",
+      "file_pattern": "Pimple_03_Burst_Frame_{frame:02d}.png",
+      "frame_count": 9,
+      "canvas_size_px": [
+        186,
+        234
+      ],
+      "source_crop_rect_px": [
+        1011,
+        1523,
+        1197,
+        1757
+      ],
+      "alpha": true
+    },
+    {
+      "pimple_id": "Pimple_05",
+      "folder": "Sprites/Pimple_05_Burst",
+      "file_pattern": "Pimple_05_Burst_Frame_{frame:02d}.png",
+      "frame_count": 9,
+      "canvas_size_px": [
+        144,
+        304
+      ],
+      "source_crop_rect_px": [
+        1013,
+        537,
+        1157,
+        841
+      ],
+      "alpha": true
+    },
+    {
+      "pimple_id": "Pimple_06",
+      "folder": "Sprites/Pimple_06_Burst",
+      "file_pattern": "Pimple_06_Burst_Frame_{frame:02d}.png",
+      "frame_count": 9,
+      "canvas_size_px": [
+        330,
+        256
+      ],
+      "source_crop_rect_px": [
+        777,
+        1041,
+        1107,
+        1297
+      ],
+      "alpha": true
+    }
+  ],
+  "note": "Pimple_04 was excluded because its content is unchanged across burst frames 01-09."
+}

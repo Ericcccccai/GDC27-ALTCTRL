@@ -69,3 +69,62 @@ test('sensor lab presents waiting state when the local reader is unavailable', a
   await page.getByRole('button',{name:'Reset zero',exact:true}).click();
   await expect(page.locator('#zero-status')).toContainText('next valid reading');
 });
+
+test('lab pressure meters show raw peaks, tune live values, and clear on zero or connection loss', async ({page}) => {
+  await page.addInitScript(() => {
+    let receiver: {onmessage:((event:{data:string})=>void)|null;onerror:(()=>void)|null};
+    let current=[0,0]; let connected=true;
+    class TestSource { onmessage=null; onerror=null; constructor(){receiver=this;} close(){} }
+    Object.defineProperty(window,'EventSource',{value:TestSource});
+    const send=(spike?:number[])=>{
+      if(!connected)return;
+      const at=Date.now();
+      const frame=(side:string,values:number[])=>({side,sequence:at,timeUs:at,acceleration:[1+values[0],0,values[1]],gyro:[0,0,0]});
+      const samples=['L','R'].flatMap(side=>[...(spike?[{side,at,frame:frame(side,spike)}]:[]),{side,at,frame:frame(side,current)}]);
+      receiver?.onmessage?.({data:JSON.stringify({throughAt:at,overflow:false,samples,links:['L','R'].map(side=>({side,path:'mock',connected:true,message:'Pressure fixture',receivedAt:at,frames:1,rejected:0,frame:frame(side,current)}))})});
+    };
+    setInterval(()=>send(),50);
+    Object.assign(window,{meterFeed:(values:number[],spike=false)=>{if(spike)send(values);else{current=values;send();}},meterDisconnect:()=>{connected=false;receiver.onerror?.();}});
+  });
+  await page.goto('/');
+  const gameState=()=>page.evaluate(async()=>{const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;return (await import(url)).game.registry.get('gameState');});
+  await expect.poll(async()=>(await gameState())?.phase).toBe('ready');
+  await page.keyboard.press('Enter');
+  await expect.poll(async()=>(await gameState()).phase).toBe('playing');
+  await page.evaluate(()=>window.dispatchEvent(new Event('sensor-lab')));
+  await expect(page.locator('#pressure-status')).toContainText('Sensors live');
+  const feed=(values:number[],spike=false)=>page.evaluate(({values,spike})=>(window as unknown as {meterFeed:(values:number[],spike:boolean)=>void}).meterFeed(values,spike),{values,spike});
+  const punch=page.locator('[data-pressure="punch"]'); const squeeze=page.locator('[data-pressure="squeeze"]');
+  await feed([1.56,.66],true);
+  await expect(punch.locator('[data-live]')).toHaveText('0%');
+  await expect(punch.locator('[data-peak]')).toHaveText('50%');
+  await expect(squeeze.locator('[data-peak]')).toHaveText('50%');
+  await expect(punch.locator('[data-peak]')).toHaveText('0%',{timeout:2000});
+  await feed([1.56,.66]);
+  await expect(punch.locator('[data-live]')).toHaveText('50%');
+  await expect(squeeze.locator('[data-live]')).toHaveText('50%');
+  await page.getByLabel('Punch power sensitivity',{exact:false}).fill('6');
+  await page.getByLabel('Punch power sensitivity',{exact:false}).press('Tab');
+  await expect(punch.locator('[data-live]')).toHaveText('25%');
+  await expect(squeeze.locator('[data-live]')).toHaveText('50%');
+  await expect(punch.getByRole('progressbar')).toHaveAttribute('aria-valuenow','25');
+  await expect(punch.locator('[data-trigger]')).toContainText('3.3%');
+  expect((await gameState()).attempts).toBe(0);
+  await page.locator('.sensor-pressure').screenshot({path:'test-results/lab-pressure-normal.png'});
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('.sensor-pressure').scrollIntoViewIfNeeded();
+  expect(await page.locator('#sensor-panel').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
+  await page.locator('.sensor-pressure').screenshot({path:'test-results/lab-pressure-small.png'});
+  await page.getByRole('button',{name:'Reset zero',exact:true}).click();
+  await expect(punch.locator('[data-live]')).toHaveText('0%');
+  await expect(punch.locator('[data-peak]')).toHaveText('0%');
+  await expect(squeeze.locator('[data-peak]')).toHaveText('0%');
+  await feed([3.12,1.32]);
+  await expect(punch.locator('[data-live]')).toHaveText('25%');
+  await page.evaluate(()=>(window as unknown as {meterDisconnect:()=>void}).meterDisconnect());
+  await expect(punch.locator('[data-live]')).toHaveText('—');
+  await expect(squeeze.locator('[data-peak]')).toHaveText('—');
+  await expect(punch.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
+  await expect(page.locator('#pressure-status')).toContainText('Waiting');
+  expect((await gameState()).attempts).toBe(0);
+});

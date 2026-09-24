@@ -5,6 +5,10 @@ import { act, createGame, startGame, tick, PIMPLE_TYPES, PIMPLE_SEQUENCE, target
 
 const C = { cream: 0xfff8ec, paper: 0xfffdf7, ink: 0x382b27, muted: 0x89796e, peach: 0xf3b499, coral: 0xe86445, mint: 0xc7d8bb, line: 0xe4d7c8 };
 const layers = ['Face_Base', 'Cheek_L', 'Cheek_R', 'EyeWhite_L', 'EyeWhite_R', 'Pupil_L', 'Pupil_R', 'Brow_L', 'Brow_R', 'Nose', 'Mouth', 'Hair_Front'];
+const hurtLayers = ['Eye_L_hurt', 'Eye_R_hurt', 'Brow_L_hurt', 'Brow_R_hurt', 'Mouth_hurt'];
+const expressionLayers = new Set(['EyeWhite_L', 'EyeWhite_R', 'Pupil_L', 'Pupil_R', 'Brow_L', 'Brow_R', 'Mouth']);
+type BurstAtlasData = { meta: { frameCount: number; frameRate: number; scalePerDisplayUnit: number } };
+const burstVariants = [1, 2, 3, 5, 6];
 const spots = [[-115, 108], [95, 100], [-62, -150], [54, -153], [15, 174], [-161, 31], [158, 30]];
 
 export default class GameScene extends Phaser.Scene {
@@ -22,6 +26,9 @@ export default class GameScene extends Phaser.Scene {
   private squeezeKey!: Phaser.GameObjects.Text;
   private punchInstruction!: Phaser.GameObjects.Text;
   private squeezeInstruction!: Phaser.GameObjects.Text;
+  private burstEffects = new Map<number, Phaser.GameObjects.Container>();
+  private normalExpression: Phaser.GameObjects.Image[] = [];
+  private hurtExpression: Phaser.GameObjects.Image[] = [];
   private face!: Phaser.GameObjects.Container;
   private pimples: Phaser.GameObjects.Image[] = [];
   private ring!: Phaser.GameObjects.Arc;
@@ -49,7 +56,8 @@ export default class GameScene extends Phaser.Scene {
 
   constructor() { super('GameScene'); }
   preload(): void {
-    for (const name of layers) this.load.image(name, `assets/${name}.webp`);
+    for (const name of [...layers, ...hurtLayers]) this.load.image(name, `assets/${name}.webp`);
+    for (const variant of burstVariants) this.load.atlas(`Burst_${variant}`, `assets/Burst_${variant}.webp`, `assets/Burst_${variant}.json`);
     for (const i of PIMPLE_SEQUENCE) this.load.image(`Pimple_${i}`, `assets/Pimple_${i}.webp`);
   }
   private text(x: number, y: number, value: string, size = 20, color = C.ink, bold = false): Phaser.GameObjects.Text {
@@ -68,6 +76,13 @@ export default class GameScene extends Phaser.Scene {
     return group;
   }
   create(): void {
+    for (const variant of burstVariants) {
+      const key = `Burst_${variant}`;
+      const { frameCount, frameRate } = (this.textures.get(key).customData as BurstAtlasData).meta;
+      if (!this.anims.exists(key)) this.anims.create({ key,
+        frames: this.anims.generateFrameNames(key, { start: 1, end: frameCount, zeroPad: 2 }),
+        frameRate, repeat: 0 });
+    }
     this.cameras.main.setBackgroundColor(C.cream);
     this.text(36, 22, 'THE SATISFYINGLY GROSS ARCADE', 11, C.muted, true).setLetterSpacing(2);
     this.text(34, 43, 'Pimple Pop', 44, C.ink, true);
@@ -96,7 +111,15 @@ export default class GameScene extends Phaser.Scene {
     this.text(618, 157, 'ONE FACE. 45 SECONDS. ZERO CHILL.', 11, C.ink, true).setOrigin(0.5).setLetterSpacing(1.4);
     this.add.ellipse(618, 658, 370, 34, C.ink, 0.09);
     this.face = this.add.container(618, 414);
-    for (const layer of layers) this.face.add(this.add.image(0, 0, layer).setDisplaySize(486, 486));
+    for (const layer of layers) {
+      const image = this.add.image(0, 0, layer).setDisplaySize(486, 486);
+      this.face.add(image);
+      if (expressionLayers.has(layer)) this.normalExpression.push(image);
+    }
+    for (const layer of hurtLayers) {
+      const image = this.add.image(0, 0, layer).setDisplaySize(486, 486).setVisible(false);
+      this.hurtExpression.push(image); this.face.add(image);
+    }
     const maskShape = this.make.graphics({ x: 0, y: 0 }).fillStyle(0xffffff).fillRoundedRect(375, 171, 486, 486, { tl: 130, tr: 130, bl: 200, br: 200 });
     this.face.setMask(maskShape.createGeometryMask());
     const initialTargets = targetsOnFace(this.state.popped);
@@ -161,6 +184,7 @@ export default class GameScene extends Phaser.Scene {
     this.events.on(Phaser.Scenes.Events.RESUME, this.visible);
     window.addEventListener('keydown', this.enter);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.clearBursts();
       this.suspendInput(); this.keyboard.destroy(); sensors.onAction = null;
       document.removeEventListener('visibilitychange', this.visible);
       window.removeEventListener('blur', this.onBlur); window.removeEventListener('focus', this.onFocus);
@@ -174,8 +198,10 @@ export default class GameScene extends Phaser.Scene {
   }
 
   private begin(): void {
-    if (this.state.phase === 'playing' || this.state.phase === 'countdown') return;
+    if (this.state.phase !== 'ready' && this.state.phase !== 'results') return;
     this.suspendInput();
+    this.clearBursts();
+    this.setHurt(false);
     this.result.setVisible(false);
     this.state = { ...createGame(), phase: 'countdown' };
     this.lastForce = 0;
@@ -203,8 +229,9 @@ export default class GameScene extends Phaser.Scene {
     if (event.source === 'keyboard') this.keyboardLast = event;
     const result = act(this.state, event.kind, event.strength);
     if (result.outcome === 'ignored') return;
-    const [px, py] = spots[this.state.target.position];
+    const poppedTarget = this.state.target;
     this.state = result.state;
+    if (this.state.phase === 'recovering') { this.suspendInput(); this.setHurt(true); }
     this.lastForce = event.strength;
     this.forceUntil = this.time.now + 400;
     const force = Math.max(0, Math.min(1, event.strength));
@@ -213,7 +240,7 @@ export default class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: this.face, scaleX: event.kind === 'punch' ? 1 + force * 0.07 : 1 - force * 0.10, scaleY: event.kind === 'punch' ? 1 - force * 0.06 : 1 + force * 0.07, angle: event.kind === 'punch' ? force * 2 : 0, duration: 80, yoyo: true, ease: 'Sine.easeOut' });
     if (result.outcome === 'correct') {
       this.message.setText(`POP! +${result.points}   ${this.state.combo > 1 ? `${this.state.combo} in a row!` : 'Sweet relief.'}`);
-      this.burst(618 + px, 414 + py, force);
+      this.burst(poppedTarget.position, poppedTarget.variant, force);
       this.refreshTarget();
     } else {
       this.message.setText(result.outcome === 'wrong' ? `Oops! This one needs a ${this.state.target.kind}. −25` : `Almost! ${this.keyboardTest ? 'Hold longer' : 'Move more strongly'}: reach ${Math.round(this.state.target.strength * 100)}% pressure.`);
@@ -221,15 +248,39 @@ export default class GameScene extends Phaser.Scene {
     }
     this.syncState();
   }
-  private burst(x: number, y: number, force: number): void {
-    for (let i = 0; i < 13; i++) {
-      const angle = i / 13 * Math.PI * 2;
-      const distance = 36 + force * 42 + Math.random() * 18;
-      const dot = this.add.circle(x, y, 3 + Math.random() * 5, i % 3 === 0 ? C.coral : C.cream).setDepth(12);
-      this.tweens.add({ targets: dot, x: x + Math.cos(angle) * distance, y: y + Math.sin(angle) * distance, alpha: 0, scale: 0.3, duration: 470, ease: 'Cubic.easeOut', onComplete: () => dot.destroy() });
+  private burst(position: number, variant: keyof typeof PIMPLE_TYPES, force: number): void {
+    const previous = this.burstEffects.get(position);
+    if (previous) this.finishBurst(position, previous);
+    const [x, y] = spots[position];
+    const effect = this.add.container(x, y);
+    this.face.add(effect);
+    this.burstEffects.set(position, effect);
+    this.pimples[position].setVisible(false);
+    if (variant === 4) {
+      // The artist deliberately excluded an unchanged blackhead sequence.
+      const label = this.text(0, -18, 'POP!', 23, C.ink, true).setOrigin(0.5);
+      effect.add(label);
+      this.tweens.add({ targets: label, y: -60, alpha: 0, duration: 550,
+        onComplete: () => this.finishBurst(position, effect) });
+      return;
     }
-    const pop = this.text(x, y - 25, 'POP!', 25, C.ink, true).setOrigin(0.5).setDepth(13);
-    this.tweens.add({ targets: pop, y: y - 90, alpha: 0, duration: 650, onComplete: () => pop.destroy() });
+    const key = `Burst_${variant}`;
+    const sprite = this.add.sprite(0, 0, key, '01');
+    const scale = PIMPLE_TYPES[variant].size * (sprite.texture.customData as BurstAtlasData).meta.scalePerDisplayUnit * (0.9 + 0.2 * force);
+    sprite.setScale(scale);
+    effect.add(sprite);
+    sprite.once(Phaser.Animations.Events.ANIMATION_COMPLETE, () => this.finishBurst(position, effect));
+    sprite.play(key);
+  }
+  private finishBurst(position: number, effect: Phaser.GameObjects.Container): void {
+    if (this.burstEffects.get(position) !== effect) return;
+    this.burstEffects.delete(position);
+    this.tweens.killTweensOf(effect.list);
+    effect.destroy(true);
+    this.pimples[position].setVisible(true);
+  }
+  private clearBursts(): void {
+    for (const [position, effect] of this.burstEffects) this.finishBurst(position, effect);
   }
   private refreshTarget(): void {
     const target = this.state.target;
@@ -237,6 +288,10 @@ export default class GameScene extends Phaser.Scene {
     const upcoming = targetsOnFace(this.state.popped);
     this.pimples.forEach((pimple, index) => {
       const active = index === target.position;
+      const effect = this.burstEffects.get(index);
+      // A revisited spot must immediately show its new active target.
+      if (active && effect) this.finishBurst(index, effect);
+      pimple.setVisible(!this.burstEffects.has(index));
       const variant = upcoming[index].variant;
       pimple.setTexture(`Pimple_${variant}`);
       const type = PIMPLE_TYPES[variant];
@@ -258,13 +313,19 @@ export default class GameScene extends Phaser.Scene {
   }
   update(_time: number, delta: number): void {
     if (!this.inputReady) return;
-    if (this.state.phase === 'playing') {
+    if (this.state.phase === 'playing' || this.state.phase === 'recovering') {
+      const wasRecovering = this.state.phase === 'recovering';
       this.state = tick(this.state, delta);
+      if (wasRecovering && this.state.phase !== 'recovering') {
+        this.setHurt(false); this.syncInput(); this.refreshTarget(); this.updateInputCopy();
+        this.message.setText(this.keyboardTest ? 'Recovered. Use a fresh key press.' : 'Recovered. Let the ball settle, then try again.');
+      }
       this.timerText.setText(String(Math.ceil(this.state.remainingMs / 1000)).padStart(2, '0'));
       this.timerText.setColor(this.state.remainingMs < 10_000 ? '#c7462e' : '#382b27');
       this.registry.set('gameState', { ...this.state, target: { ...this.state.target } });
       if (this.state.phase === 'results') {
         this.suspendInput();
+        this.clearBursts(); this.setHurt(false);
         this.resultScore.setText(String(this.state.score));
         this.resultDetail.setText(`${this.state.popped} pimples popped\nBest combo: ${this.state.bestCombo}  ·  ${this.state.attempts ? Math.round(this.state.popped / this.state.attempts * 100) : 0}% accuracy`);
         this.result.setVisible(true);
@@ -274,6 +335,18 @@ export default class GameScene extends Phaser.Scene {
     } else if (this.state.phase !== 'results') {
       this.timerText.setText('45').setColor('#382b27');
     }
+    const count = (['L','R'] as const).filter(side => sensors.isLive(side)).length;
+    if (this.state.phase === 'recovering' && this.state.recovery) {
+      const { remainingMs, durationMs, severe } = this.state.recovery;
+      this.statusLabel.setText(`${this.keyboardTest ? 'KEYBOARD TEST MODE' : `${count}/2 sensors live`} · recovering · inputs paused`);
+      this.pressureLabel.setText(`RECOVERING · ${(remainingMs / 1000).toFixed(1)}s`);
+      this.pressureFill.setDisplaySize(Math.max(0.01, 252 * (1 - remainingMs / durationMs)), 19).setFillStyle(0x719068);
+      this.targetHint.setText('OUCH! TAKE A BREAK');
+      this.strengthText.setText('Actions paused');
+      this.pressureHelp.setText('Let the face recover.\nThen start a fresh action.');
+      this.message.setText(severe ? 'Ouch! Wrong move + too much pressure. Rest a moment.' : 'Ouch! Give the face a moment to recover.');
+      return;
+    }
     const charge = this.keyboardTest && this.state.phase === 'playing' ? this.keyboard.getCharge() : null;
     const strength = charge?.strength ?? (this.time.now < this.forceUntil ? this.lastForce : 0);
     this.pressureFill.setDisplaySize(Math.max(0.01, 252 * strength), 19).setFillStyle(strength >= this.state.target.strength ? 0x719068 : C.coral);
@@ -282,8 +355,14 @@ export default class GameScene extends Phaser.Scene {
       ? charge ? `${charge.kind.toUpperCase()} ${Math.round(charge.strength*100)}% · RELEASE`
         : this.keyboardLast ? `${this.keyboardLast.kind.toUpperCase()} ${Math.round(this.keyboardLast.strength*100)}% · test` : 'Hold an arrow, then release'
       : last ? `${last.kind.toUpperCase()} ${Math.round(last.strength*100)}% · settle` : 'Smack or squeeze the ball');
-    const count = (['L','R'] as const).filter(side => sensors.isLive(side)).length;
     this.statusLabel.setText(this.keyboardTest ? 'KEYBOARD TEST MODE · sensor scoring off · Sensor lab to exit' : `${count}/2 sensors live · ${last ? `X ${last.xPeak.toFixed(2)} g · Z ${last.zPeak.toFixed(2)} g` : 'Hold still to arm'} · Sensor lab to tune`);
+  }
+  private setHurt(hurt: boolean): void {
+    if (hurt) this.clearBursts();
+    this.normalExpression.forEach(image => image.setVisible(!hurt));
+    this.hurtExpression.forEach(image => image.setVisible(hurt));
+    this.ring.setVisible(!hurt); this.targetArrow.setVisible(!hurt);
+    this.threshold.setVisible(!hurt);
   }
   setKeyboardTest(enabled: boolean): void {
     if (enabled === this.keyboardTest) return;

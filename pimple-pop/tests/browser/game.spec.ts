@@ -26,6 +26,7 @@ test('raw sensor batches score punch and squeeze, wrong move, cancellation, arro
   await gesture(4,0); await expect.poll(async()=>(await state(page)).popped).toBe(1); expect((await state(page)).score).toBe(150);
   await page.waitForTimeout(600); await gesture(0,2); await expect.poll(async()=>(await state(page)).popped).toBe(2); expect((await state(page)).combo).toBe(2);
   await page.waitForTimeout(600); await gesture(0,2); await expect.poll(async()=>(await state(page)).attempts).toBe(3); expect((await state(page)).score).toBe(275); expect((await state(page)).combo).toBe(0);
+  await expect.poll(async()=>(await state(page)).phase,{timeout:7000}).toBe('playing');
   await page.waitForTimeout(600); await gesture(4,0); await page.evaluate(()=>window.dispatchEvent(new Event('sensor-lab'))); await page.waitForTimeout(250); expect((await state(page)).attempts).toBe(3);
   await page.getByRole('button',{name:'Back to game'}).click(); await page.waitForTimeout(600);
   await page.screenshot({path:'test-results/playing.png'});
@@ -56,6 +57,8 @@ test('power tuning lowers percentages independently, validates inputs, and survi
   await page.screenshot({path:'test-results/power-sensitivity.png'});
   await page.getByRole('button',{name:'Back to game'}).click(); await page.waitForTimeout(600);
   await gesture(1.2,0); await expect.poll(pressure).toBe('PUNCH 19% · settle');
+  // Advance to the squeeze target with a correct punch, so this sensitivity check cannot roll an unrelated hurt event.
+  await page.waitForTimeout(600); await gesture(4,0); await expect.poll(async()=>(await state(page)).popped).toBe(3);
   await page.waitForTimeout(600); await gesture(0,1.2); await expect.poll(pressure).toBe('SQUEEZE 48% · settle');
   await page.reload(); await expect.poll(async()=>(await state(page))?.phase).toBe('ready');
   await page.evaluate(()=>window.dispatchEvent(new Event('sensor-lab'))); await expect(punch).toHaveValue('6'); await expect(squeeze).toHaveValue('2.4');
@@ -81,7 +84,7 @@ test('all six v002 variants render their consistent artwork, action, pressure an
       const target=game.registry.get('gameState').target;
       const scene=game.scene.getScene('GameScene');
       const pimple=scene.pimples[target.position];
-      return {variant:target.variant,kind:target.kind,name:scene.targetText.text,pressure:scene.strengthText.text,
+      return {position:target.position,variant:target.variant,kind:target.kind,name:scene.targetText.text,pressure:scene.strengthText.text,
         hint:scene.targetHint.text,texture:pimple.texture.key,tint:pimple.tintTopLeft,
         x:pimple.x,y:pimple.y,ringX:scene.ring.x,ringY:scene.ring.y,radius:scene.ring.radius,width:pimple.displayWidth};
     });
@@ -97,6 +100,31 @@ test('all six v002 variants render their consistent artwork, action, pressure an
     await page.screenshot({path:`test-results/v002-${variant.id}.png`});
     await page.evaluate(kind=>(window as unknown as {gesture:(x:number,z:number)=>void}).gesture(kind==='punch'?4:0,kind==='squeeze'?2:0),variant.kind);
     await expect.poll(async()=>(await state(page)).popped).toBe(index+1);
+    const burst=await page.evaluate(async position=>{
+      const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+      const scene=(await import(url)).game.scene.getScene('GameScene');
+      const effect=scene.burstEffects.get(position);
+      const sprite=effect?.list.find((child:{type:string})=>child.type==='Sprite');
+      return {x:effect?.x,y:effect?.y,parent:effect?.parentContainer===scene.face,key:sprite?.anims.currentAnim?.key ?? null,
+        hidden:!scene.pimples[position].visible};
+    },rendered.position);
+    expect(burst.x).toBe(rendered.x); expect(burst.y).toBe(rendered.y); expect(burst.parent).toBe(true);
+    expect(burst.key).toBe(variant.id===4 ? null : `Burst_${variant.id}`);
+    expect(burst.hidden).toBe(true);
+    if(variant.id!==4) {
+      await expect.poll(()=>page.evaluate(async position=>{
+        const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+        const sprite=(await import(url)).game.scene.getScene('GameScene').burstEffects.get(position)?.list[0];
+        if(sprite?.frame.name!=='05')return false;
+        sprite.anims.pause(); return true;
+      },rendered.position),{intervals:[10],timeout:3000}).toBe(true);
+      await page.screenshot({path:`test-results/burst-variant-${variant.id}.png`});
+      await page.evaluate(async position=>{
+        const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+        (await import(url)).game.scene.getScene('GameScene').burstEffects.get(position).list[0].anims.resume();
+      },rendered.position);
+    }
+
   }
   expect((await state(page)).target.variant).toBe(1);
   expect((await state(page)).combo).toBe(6);
@@ -174,4 +202,112 @@ test('keyboard test mode is explicit, exclusive, cancellable, and off after relo
   await page.reload(); await expect.poll(async()=>(await state(page))?.phase).toBe('ready');
   expect(await mode()).toBe(false); await lab(); await expect(checkbox).not.toBeChecked();
   expect(errors).toEqual([]);
+});
+
+test('hurt recovery blocks both inputs, pauses in lab, restores face and requires fresh actions', async ({page}) => {
+  await page.goto('/'); await expect.poll(async()=>(await state(page))?.phase).toBe('ready');
+  await page.keyboard.press('Enter'); await expect.poll(async()=>(await state(page)).phase).toBe('playing'); await page.waitForTimeout(350);
+  const gesture=(x:number,z:number)=>page.evaluate(([x,z])=>(window as unknown as {gesture:(x:number,z:number)=>void}).gesture(x,z),[x,z]);
+  const face=()=>page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    const scene=(await import(url)).game.scene.getScene('GameScene');
+    return {normal:scene.normalExpression.map((image:{visible:boolean})=>image.visible),hurt:scene.hurtExpression.map((image:{visible:boolean})=>image.visible),ring:scene.ring.visible};
+  });
+  await page.screenshot({path:'test-results/hurt-normal-before.png'});
+  await gesture(0,2); await expect.poll(async()=>(await state(page)).phase).toBe('recovering');
+  const hurt=await state(page); expect(hurt.recovery.durationMs).toBe(5000); expect(hurt.recovery.severe).toBe(true);
+  expect((await face()).normal.every((visible:boolean)=>!visible)).toBe(true); expect((await face()).hurt.every(Boolean)).toBe(true);
+  await page.waitForTimeout(200); await page.screenshot({path:'test-results/hurt-recovering.png'});
+  await page.keyboard.press('Enter'); await gesture(4,0); await page.waitForTimeout(200);
+  expect((await state(page)).attempts).toBe(1); expect((await state(page)).remainingMs).toBeLessThan(hurt.remainingMs);
+  await page.evaluate(()=>window.dispatchEvent(new Event('sensor-lab')));
+  const paused=await state(page); await page.getByRole('checkbox',{name:'Keyboard test mode'}).check();
+  await page.getByRole('button',{name:'Reset zero',exact:true}).click(); await page.waitForTimeout(400);
+  expect((await state(page)).recovery.remainingMs).toBe(paused.recovery.remainingMs);
+  await page.getByRole('button',{name:'Back to game'}).click();
+  await page.keyboard.down('ArrowUp'); await expect.poll(async()=>(await state(page)).phase,{timeout:7000}).toBe('playing');
+  await page.keyboard.down('ArrowUp'); await page.keyboard.up('ArrowUp'); expect((await state(page)).attempts).toBe(1);
+  const restored=await face(); expect(restored.normal.every(Boolean)).toBe(true); expect(restored.hurt.some(Boolean)).toBe(false); expect(restored.ring).toBe(true);
+  await page.screenshot({path:'test-results/hurt-restored.png'});
+  await page.keyboard.down('ArrowUp'); await page.waitForTimeout(700); await page.keyboard.up('ArrowUp');
+  await expect.poll(async()=>(await state(page)).popped).toBe(1);
+  await page.evaluate(()=>window.dispatchEvent(new Event('sensor-lab')));
+  await page.getByRole('checkbox',{name:'Keyboard test mode'}).uncheck(); await page.getByRole('button',{name:'Back to game'}).click();
+  await page.waitForTimeout(500); await gesture(4,0); await expect.poll(async()=>(await state(page)).phase).toBe('recovering');
+  const attempts=(await state(page)).attempts;
+  // Complete recovery through the normal update, then send a pre-rearm sensor impact in the same turn.
+  await page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    const game=(await import(url)).game; game.scene.getScene('GameScene').update(0,game.registry.get('gameState').recovery.remainingMs);
+    (window as unknown as {gesture:(x:number,z:number)=>void}).gesture(4,0);
+  });
+  await page.waitForTimeout(250); expect((await state(page)).attempts).toBe(attempts);
+  await page.waitForTimeout(400); await gesture(4,0); await expect.poll(async()=>(await state(page)).phase).toBe('recovering');
+  await page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    (await import(url)).game.scene.getScene('GameScene').update(0,45000);
+  });
+  expect((await state(page)).phase).toBe('results'); expect((await state(page)).recovery).toBeNull();
+  expect((await face()).hurt.some(Boolean)).toBe(false);
+  await page.keyboard.press('Enter'); await expect.poll(async()=>(await state(page)).phase).toBe('playing');
+  expect((await state(page)).attempts).toBe(0); expect((await face()).normal.every(Boolean)).toBe(true);
+});
+
+test('authored burst plays ordered frames and cleans up on overlap, hurt and restart', async ({page}) => {
+  await page.goto('/'); await expect.poll(async()=>(await state(page))?.phase).toBe('ready');
+  await page.keyboard.press('Enter'); await expect.poll(async()=>(await state(page)).phase).toBe('playing'); await page.waitForTimeout(350);
+  const gesture=(x:number,z:number)=>page.evaluate(([x,z])=>(window as unknown as {gesture:(x:number,z:number)=>void}).gesture(x,z),[x,z]);
+  const count=()=>page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    return (await import(url)).game.scene.getScene('GameScene').burstEffects.size;
+  });
+  await gesture(.3,0); await expect.poll(async()=>(await state(page)).attempts).toBe(1); expect(await count()).toBe(0);
+  await page.waitForTimeout(500); await gesture(4,0);
+  for (const [frame,label] of [['01','early'],['05','middle'],['09','late']]) {
+    await expect.poll(() => page.evaluate(async desired=>{
+      const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+      const scene=(await import(url)).game.scene.getScene('GameScene');
+      const sprite=scene.burstEffects.get(0)?.list[0];
+      if(sprite?.frame.name!==desired)return false;
+      sprite.anims.pause(); return true;
+    },frame), { intervals: [10], timeout: 3000 }).toBe(true);
+    await page.screenshot({path:`test-results/burst-${label}.png`});
+    await page.evaluate(async()=>{
+      const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+      (await import(url)).game.scene.getScene('GameScene').burstEffects.get(0).list[0].anims.resume();
+    });
+  }
+  await expect.poll(count).toBe(0);
+  await gesture(0,2); await expect.poll(async()=>(await state(page)).popped,{intervals:[10]}).toBe(2);
+  await page.waitForTimeout(350); await gesture(4,0); await expect.poll(async()=>(await state(page)).popped,{intervals:[10]}).toBe(3);
+  expect(await count()).toBe(2); await page.screenshot({path:'test-results/burst-overlap.png'});
+  await page.waitForTimeout(350); await gesture(4,0);
+  await expect.poll(async()=>(await state(page)).phase).toBe('recovering'); expect(await count()).toBe(0);
+  await page.screenshot({path:'test-results/burst-cleared-on-hurt.png'});
+  await page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    const game=(await import(url)).game; game.scene.getScene('GameScene').update(0,game.registry.get('gameState').recovery.remainingMs);
+  });
+  await page.waitForTimeout(500); await gesture(0,2); await expect.poll(async()=>(await state(page)).popped,{intervals:[10]}).toBe(4);
+  expect(await count()).toBe(1);
+  await page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    (await import(url)).game.scene.getScene('GameScene').update(0,45000);
+  });
+  expect(await count()).toBe(0); await page.keyboard.press('Enter');
+  await expect.poll(async()=>(await state(page)).phase).toBe('playing'); expect(await count()).toBe(0);
+  expect((await state(page)).popped).toBe(0);
+  // Exercise same-spot completion ordering independently of the input cooldown.
+  const race=await page.evaluate(async()=>{
+    const url=document.querySelector<HTMLScriptElement>('script[src*="/src/main.ts"]')!.src;
+    const game=(await import(url)).game; const scene=game.scene.getScene('GameScene');
+    const {position,variant}=game.registry.get('gameState').target;
+    scene.burst(position,variant,1); const older=scene.burstEffects.get(position);
+    scene.burst(position,variant,1); const newer=scene.burstEffects.get(position);
+    scene.finishBurst(position,older);
+    const protectedNewer=scene.burstEffects.get(position)===newer && !scene.pimples[position].visible;
+    scene.refreshTarget();
+    return {protectedNewer,activeVisible:scene.pimples[position].visible,remaining:scene.burstEffects.size};
+  });
+  expect(race).toEqual({protectedNewer:true,activeVisible:true,remaining:0});
 });

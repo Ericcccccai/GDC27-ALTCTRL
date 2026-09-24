@@ -1,14 +1,22 @@
-import { GestureDetector, GESTURE_STORAGE_KEY, parseGestureSettings, validateGestureSettings, type GestureSettings, type SensorActionEvent } from './input';
+import { GestureDetector, pressureStrength, GESTURE_STORAGE_KEY, parseGestureSettings, validateGestureSettings, type GestureSettings, type SensorActionEvent } from './input';
 import { DEFAULT_DEAD_ZONE, SensorSignal, STALE_MS, type SensorLink, type Side, type ImuFrame } from './sensors';
 export interface SensorBatch { throughAt: number; links: SensorLink[]; samples: { side: Side; at: number; frame: ImuFrame }[]; overflow: boolean }
 const sides: Side[] = ['L', 'R'];
+export const PRESSURE_PEAK_MS = 1000;
+type PressureSample = { at: number; x: number; z: number };
 
 /** Single connection and baseline owner for the game and diagnostic view. */
 export class SensorStore {
   readonly signals = { L: new SensorSignal(), R: new SensorSignal() };
   readonly detector = new GestureDetector();
   links: SensorLink[] = [];
-  deadZone = DEFAULT_DEAD_ZONE;
+  private deadZoneValue = DEFAULT_DEAD_ZONE;
+  private pressureHistory: Record<Side, PressureSample[]> = { L: [], R: [] };
+  get deadZone(): number { return this.deadZoneValue; }
+  set deadZone(value: number) {
+    this.deadZoneValue = value;
+    this.clearPressureHistory();
+  }
   bridgeLive = false;
   lastMessage = 0;
   lastAction: SensorActionEvent | null = null;
@@ -23,13 +31,13 @@ export class SensorStore {
     this.storage = storage;
     try {
       const settings = parseGestureSettings(storage.getItem(GESTURE_STORAGE_KEY));
-      if (settings) { this.detector.settings = settings; this.cancel(); }
+      if (settings) { this.detector.settings = settings; this.clearPressureHistory(); this.cancel(); }
     } catch { /* Storage may be unavailable; current session settings still work. */ }
   }
   updateSettings(settings: GestureSettings, at = Date.now()): 'invalid' | 'saved' | 'session' {
     const valid = validateGestureSettings(settings);
     if (!valid) return 'invalid';
-    this.detector.settings = valid; this.cancel(at);
+    this.detector.settings = valid; this.clearPressureHistory(); this.cancel(at);
     try {
       if (!this.storage) return 'session';
       this.storage.setItem(GESTURE_STORAGE_KEY, JSON.stringify(valid));
@@ -38,7 +46,7 @@ export class SensorStore {
   }
   setEnabled(enabled: boolean, at = Date.now()): void { if (enabled !== this.enabled) { this.enabled = enabled; this.cancel(at); } }
   cancel(at = Date.now()): void { this.detector.cancel(); this.evidenceAfter = Math.max(this.evidenceAfter, at); }
-  reset(selected: Side[] = sides, at = Date.now()): void { selected.forEach(side => { this.signals[side].reset(); this.zeroAfter[side] = at; }); this.cancel(at); }
+  reset(selected: Side[] = sides, at = Date.now()): void { selected.forEach(side => { this.signals[side].reset(); this.pressureHistory[side] = []; this.zeroAfter[side] = at; }); this.cancel(at); }
   isLive(side: Side, now = Date.now()): boolean {
     const link = this.links.find(link => link.side === side);
     return this.bridgeLive && now - this.lastMessage < STALE_MS && !!link?.connected && now - link.receivedAt < STALE_MS;
@@ -50,22 +58,52 @@ export class SensorStore {
     if (batch.overflow) { this.reset(sides, now); return; }
     for (const { side, at, frame } of [...batch.samples].sort((a,b) => a.at - b.at)) {
       if (!this.isLive(side, now) || now - at >= STALE_MS || at <= this.zeroAfter[side]) continue;
-      if (this.latest[side] && at - this.latest[side] >= STALE_MS) { this.signals[side].reset(); this.cancel(at); }
+      if (this.latest[side] && at - this.latest[side] >= STALE_MS) { this.signals[side].reset(); this.pressureHistory[side] = []; this.cancel(at); }
       this.signals[side].accept(frame, at); this.latest[side] = at;
+      // Diagnostics observe every captured sample, including when gameplay is paused.
+      this.pressureHistory[side] = this.pressureHistory[side].filter(sample => now - sample.at < PRESSURE_PEAK_MS);
+      if (now - at < PRESSURE_PEAK_MS) this.pressureHistory[side].push({ at, ...this.sidePressure(side) });
       if (!this.enabled || at <= this.evidenceAfter) continue;
       this.emit(at - 0.001);
       // Never let an old board reading participate in a newer sample's evidence.
       const active = sides.filter(s => this.isLive(s, now) && at - this.latest[s] < STALE_MS && this.signals[s].baseline);
-      const peak = (axis: number) => Math.max(0, ...active.map(s => Math.max(0, Math.abs(this.signals[s].delta[axis]) - this.deadZone)));
-      this.detector.sample(peak(0), peak(2), at);
+      const peak = this.currentPressure(active);
+      this.detector.sample(peak.x, peak.z, at);
     }
     if (this.enabled && this.liveSides.size) this.emit(batch.throughAt);
+  }
+  private clearPressureHistory(): void { this.pressureHistory = { L: [], R: [] }; }
+  private sidePressure(side: Side): { x: number; z: number } {
+    const signal = this.signals[side];
+    const peak = (axis: number) => Math.max(0, Math.abs(signal.delta[axis]) - this.deadZone);
+    return { x: peak(0), z: peak(2) };
+  }
+  private currentPressure(active: Side[]): { x: number; z: number } {
+    const values = active.map(side => this.sidePressure(side));
+    return { x: Math.max(0, ...values.map(value => value.x)), z: Math.max(0, ...values.map(value => value.z)) };
+  }
+  pressure(now = Date.now()) {
+    const active = sides.filter(side => this.isLive(side, now) && now - this.latest[side] < STALE_MS && this.signals[side].baseline);
+    const live = this.currentPressure(active);
+    const recent = active.flatMap(side => {
+      this.pressureHistory[side] = this.pressureHistory[side].filter(sample => now - sample.at < PRESSURE_PEAK_MS);
+      return this.pressureHistory[side];
+    });
+    const channel = (axis: 'x' | 'z', full: number, threshold: number) => ({
+      live: pressureStrength(live[axis], full),
+      peak: pressureStrength(Math.max(live[axis], ...recent.map(sample => sample[axis])), full),
+      trigger: pressureStrength(threshold, full),
+    });
+    const settings = this.detector.settings;
+    return { ready: active.length > 0,
+      punch: channel('x', settings.punchFull, settings.punchThreshold),
+      squeeze: channel('z', settings.squeezeFull, settings.squeezeThreshold) };
   }
   private checkHealth(now: number): void {
     for (const side of sides) {
       const live = this.isLive(side, now);
       if (live !== this.liveSides.has(side)) {
-        this.signals[side].reset(); this.cancel(now);
+        this.signals[side].reset(); this.pressureHistory[side] = []; this.cancel(now);
         if (live) this.liveSides.add(side); else this.liveSides.delete(side);
       }
     }

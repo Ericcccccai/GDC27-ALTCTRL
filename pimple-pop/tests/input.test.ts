@@ -154,3 +154,58 @@ test('blur, hidden, pause and mode changes cancel held input; repeats cannot res
     keyboard.destroy();
   }
 });
+
+test('lab pressure observes raw spikes while scoring is disabled and shares game power', () => {
+  const s = new SensorStore(); let actions = 0; s.onAction = () => actions++;
+  quiet(s, 100); quiet(s, 300);
+  s.accept(batch(350, [
+    { side: 'L', acceleration: [2.56, 0, 0] },
+    { side: 'R', acceleration: [-2.06, 0, -.66] },
+    { side: 'L', acceleration: [1, 0, 0] },
+    { side: 'R', acceleration: [1, 0, 0] },
+  ]), 350);
+  const reading = s.pressure(350);
+  assert.equal(reading.ready, true);
+  assert.equal(reading.punch.live, 0); assert.equal(reading.squeeze.live, 0);
+  assert.equal(reading.punch.peak, 1); assert.ok(Math.abs(reading.squeeze.peak - .5) < 1e-9);
+  assert.equal(reading.punch.trigger, .2 / 3);
+  assert.equal(actions, 0); assert.equal(s.lastAction, null);
+  quiet(s, 1000); assert.equal(s.pressure(1349).punch.peak, 1);
+  assert.equal(s.pressure(1350).punch.peak, 0);
+  s.setEnabled(true, 1400); quiet(s, 1450); quiet(s, 1650);
+  s.accept(batch(1700, [{side:'L', acceleration:[2.56,0,0]}]), 1700);
+  s.accept(batch(1800, []), 1800);
+  assert.equal(s.pressure(1800).punch.live, s.lastAction!.strength);
+  assert.equal(actions, 1);
+});
+
+test('pressure tuning immediately rescales live channels and clears old peaks', () => {
+  const s = new SensorStore(); quiet(s,100);
+  s.accept(batch(200, [{side:'L',acceleration:[2.56,0,.66]}]),200);
+  assert.ok(Math.abs(s.pressure(200).punch.live-.5)<1e-9);
+  s.updateSettings({...s.detector.settings,punchFull:6},210);
+  assert.ok(Math.abs(s.pressure(210).punch.live-.25)<1e-9);
+  assert.ok(Math.abs(s.pressure(210).squeeze.live-.5)<1e-9);
+  quiet(s,220); assert.equal(s.pressure(220).punch.peak,0);
+  s.accept(batch(230,[{side:'L',acceleration:[2.56,0,.66]}]),230);
+  s.deadZone=.16;
+  assert.ok(Math.abs(s.pressure(230).punch.live-1.4/6)<1e-9);
+  quiet(s,240); assert.equal(s.pressure(240).squeeze.peak,0);
+});
+
+test('pressure clears affected boards on zero, loss, stale, overflow and reconnect', () => {
+  for (const reason of ['reset','loss','stale','disconnect','overflow']) {
+    const s=new SensorStore(); quiet(s,100);
+    s.accept(batch(200,[{side:'L',acceleration:[4.06,0,0]},{side:'R',acceleration:[1,0,.66]}]),200);
+    if (reason==='reset') s.reset(['L'],210);
+    if (reason==='loss') s.accept(batch(210,[],['R']),210);
+    if (reason==='stale') s.advance(1500);
+    if (reason==='disconnect') s.disconnect(210);
+    if (reason==='overflow') s.accept({...batch(210,[]),overflow:true},210);
+    const value=s.pressure(reason==='stale'?1500:210);
+    assert.equal(value.punch.live,0,reason); assert.equal(value.punch.peak,0,reason);
+    assert.equal(value.ready,reason==='reset'||reason==='loss',reason);
+    if(value.ready) assert.ok(Math.abs(value.squeeze.peak-.5)<1e-9,reason);
+    quiet(s,1600); assert.equal(s.pressure(1600).punch.peak,0,reason);
+  }
+});
